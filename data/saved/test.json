@@ -1,0 +1,75 @@
+{
+  "version": "1.0",
+  "created_at": "2026-05-07T22:59:57.492585",
+  "shapes": [
+    {
+      "type": "rectangle",
+      "style": {
+        "pen_color": "#FF0000",
+        "pen_width": 1.0,
+        "pen_style": 1,
+        "brush_color": "#FFFF00",
+        "brush_style": 1,
+        "opacity": 1.0
+      },
+      "selected": false,
+      "visible": true,
+      "transform": {
+        "m11": 1.0,
+        "m12": 0.0,
+        "m21": 0.0,
+        "m22": 1.0,
+        "dx": 0.0,
+        "dy": 0.0
+      },
+      "rect": {
+        "x": 10.0,
+        "y": 10.0,
+        "width": 100.0,
+        "height": 60.0
+      }
+    },
+    {
+      "type": "ellipse",
+      "style": {
+        "pen_color": "#0000FF",
+        "pen_width": 1.0,
+        "pen_style": 1,
+        "brush_color": "#00FF00",
+        "brush_style": 1,
+        "opacity": 1.0
+      },
+      "selected": false,
+      "visible": true,
+      "transform": {
+        "m11": 1.0,
+        "m12": 0.0,
+        "m21": 0.0,
+        "m22": 1.0,
+        "dx": 0.0,
+        "dy": 0.0
+      }
+    },
+    {
+      "type": "line",
+      "style": {
+        "pen_color": "#FF00FF",
+        "pen_width": 3,
+        "pen_style": 1,
+        "brush_color": "#FFFFFF",
+        "brush_style": 1,
+        "opacity": 1.0
+      },
+      "selected": false,
+      "visible": true,
+      "transform": {
+        "m11": 1.0,
+        "m12": 0.0,
+        "m21": 0.0,
+        "m22": 1.0,
+        "dx": 0.0,
+        "dy": 0.0
+      }
+    }
+  ]
+}

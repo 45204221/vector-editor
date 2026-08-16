@@ -1,0 +1,50 @@
+# Python bytecode and test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+
+# Native/CMake build products
+native/build/
+native/build-*/
+native/bin/
+*.pyd
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+build.ninja
+.ninja_deps
+.ninja_log
+
+# IDE and operating-system metadata
+.idea/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+.DS_Store
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+~$*
+
+# Editor-generated documents and exports
+src/untitled*.json
+src/test.json
+src/export*.png
+src/export*.svg
+src/offscreen_output.png
