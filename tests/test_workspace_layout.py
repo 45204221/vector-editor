@@ -44,12 +44,13 @@ class WorkspaceLayoutTests(unittest.TestCase):
     def test_engine_lab_owns_advanced_paged_panels(self):
         lab = self.window.engine_lab_window
         self.assertFalse(lab.isVisible())
-        self.assertEqual(lab.pages.count(), 5)
+        self.assertEqual(lab.pages.count(), 6)
         self.assertEqual(lab.pages.tabText(0), "渲染管线")
         self.assertEqual(lab.pages.tabText(1), "性能分析")
-        self.assertEqual(lab.pages.tabText(2), "纹理/实例化")
+        self.assertEqual(lab.pages.tabText(2), "Atlas/实例化")
         self.assertEqual(lab.pages.tabText(3), "2D 光照/阴影")
         self.assertEqual(lab.pages.tabText(4), "3D 渲染管线")
+        self.assertEqual(lab.pages.tabText(5), "纹理采样/LOD")
         self.assertIs(self.window.pipeline_panel, lab.pipeline_panel)
         self.assertIs(self.window.performance_panel, lab.performance_panel)
         self.assertIs(self.window.lighting_panel, lab.lighting_panel)
