@@ -8,6 +8,7 @@
 #include "visibility.hpp"
 #include "mesh_extrusion.hpp"
 #include "software_rasterizer.hpp"
+#include "texture_sampling.hpp"
 
 namespace {
 
@@ -350,6 +351,67 @@ PyObject* py_software_rasterize(PyObject*, PyObject* args, PyObject* kwargs) {
     }
 }
 
+bool parse_rgba_buffer(PyObject* object, std::vector<std::uint8_t>& output) {
+    Py_buffer view{};
+    if (PyObject_GetBuffer(object, &view, PyBUF_CONTIG_RO) < 0) return false;
+    const auto* first = static_cast<const std::uint8_t*>(view.buf);
+    output.assign(first, first + view.len);
+    PyBuffer_Release(&view);
+    return true;
+}
+
+PyObject* mip_levels_to_tuple(const std::vector<vector_engine::TextureLevel>& levels) {
+    PyObject* result = PyTuple_New(static_cast<Py_ssize_t>(levels.size()));
+    if (!result) return nullptr;
+    for (Py_ssize_t index = 0; index < static_cast<Py_ssize_t>(levels.size()); ++index) {
+        const auto& level = levels[static_cast<std::size_t>(index)];
+        PyObject* pixels = PyBytes_FromStringAndSize(
+            reinterpret_cast<const char*>(level.rgba.data()),
+            static_cast<Py_ssize_t>(level.rgba.size()));
+        if (!pixels) { Py_DECREF(result); return nullptr; }
+        PyObject* value = Py_BuildValue("(iiN)", level.width, level.height, pixels);
+        if (!value) { Py_DECREF(result); return nullptr; }
+        PyTuple_SET_ITEM(result, index, value);
+    }
+    return result;
+}
+
+PyObject* py_generate_mipmaps(PyObject*, PyObject* args) {
+    PyObject* rgba_object = nullptr;
+    int width = 0, height = 0;
+    if (!PyArg_ParseTuple(args, "Oii", &rgba_object, &width, &height)) return nullptr;
+    std::vector<std::uint8_t> rgba;
+    if (!parse_rgba_buffer(rgba_object, rgba)) return nullptr;
+    try {
+        return mip_levels_to_tuple(vector_engine::generate_mipmaps(rgba, width, height));
+    } catch (const std::exception& error) {
+        PyErr_SetString(PyExc_ValueError, error.what()); return nullptr;
+    }
+}
+
+PyObject* py_sample_texture(PyObject*, PyObject* args, PyObject* kwargs) {
+    PyObject* rgba_object = nullptr;
+    int width = 0, height = 0, repeat = 1;
+    double u = 0.0, v = 0.0, lod = 0.0;
+    const char* filter = "nearest";
+    static const char* names[] = {"rgba", "width", "height", "u", "v", "lod",
+                                  "filter", "repeat", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oiiddd|sp",
+                                     const_cast<char**>(names), &rgba_object,
+                                     &width, &height, &u, &v, &lod, &filter,
+                                     &repeat)) return nullptr;
+    std::vector<std::uint8_t> rgba;
+    if (!parse_rgba_buffer(rgba_object, rgba)) return nullptr;
+    try {
+        const auto levels = vector_engine::generate_mipmaps(rgba, width, height);
+        const auto color = vector_engine::sample_mipmaps(
+            levels, u, v, lod, filter, repeat != 0);
+        return Py_BuildValue("(BBBB)", color[0], color[1], color[2], color[3]);
+    } catch (const std::exception& error) {
+        PyErr_SetString(PyExc_ValueError, error.what()); return nullptr;
+    }
+}
+
 PyMethodDef methods[] = {
     {"tessellate_stroke", reinterpret_cast<PyCFunction>(py_tessellate_stroke),
      METH_VARARGS | METH_KEYWORDS, "Tessellate a polyline into 2D triangles."},
@@ -366,6 +428,11 @@ PyMethodDef methods[] = {
     {"software_rasterize", reinterpret_cast<PyCFunction>(py_software_rasterize),
      METH_VARARGS | METH_KEYWORDS,
      "Rasterize clip-space triangles into CPU color/depth/barycentric buffers."},
+    {"generate_mipmaps", py_generate_mipmaps, METH_VARARGS,
+     "Generate a complete RGBA8 mip chain with a 2x2 box filter."},
+    {"sample_texture", reinterpret_cast<PyCFunction>(py_sample_texture),
+     METH_VARARGS | METH_KEYWORDS,
+     "Sample an RGBA8 mip chain with nearest, bilinear or trilinear filtering."},
     {nullptr, nullptr, 0, nullptr},
 };
 

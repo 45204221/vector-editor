@@ -293,6 +293,8 @@ class _PipelineGLFunctions:
             "glDrawArrays": (None, ctypes.c_uint, ctypes.c_int, ctypes.c_int),
             "glActiveTexture": (None, ctypes.c_uint),
             "glBindTexture": (None, ctypes.c_uint, ctypes.c_uint),
+            "glTexParameteri": (None, ctypes.c_uint, ctypes.c_uint,
+                                ctypes.c_int),
             "glBindFramebuffer": (None, ctypes.c_uint, ctypes.c_uint),
             "glDrawBuffers": (None, ctypes.c_int,
                               ctypes.POINTER(ctypes.c_uint)),
