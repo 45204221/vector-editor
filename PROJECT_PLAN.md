@@ -1502,4 +1502,28 @@ C++ 读取固定的 24-byte 顶点格式和 draw command；Python 仍管理 Qt �
 - 自动化新增确定性纹理、链尺寸、2×2 golden、奇数边缘、过滤/wrap golden、非法契约、C++ parity、页面布局、History 中立和隐藏 timer；完整测试由 126 增至 134，结果 134/134。
 - 真实 OpenGL 4.6：Nearest/Bilinear/Trilinear、Mip-color、LOD heatmap、手动 L0/L7 均成功输出；七种配置得到六种不同 framebuffer signature（Bilinear auto 与手动 L0 在当前场景等价是预期行为），context/texture 有效且无错误。既有 M17/M18 3D smoke 也完整通过。
 - 当前边界：M19.1 固定使用线性 RGBA8 程序纹理，暂不引入图片文件、sRGB/gamma、压缩纹理或各向异性扩展；这些不会干扰本阶段对基本 footprint、Mip 和过滤规则的讲解。M19.2 再扩展 sample footprint、anisotropic taps 与性能/质量对照。
+
+### 2026-08-17 / M19.2 纹理导数、采样 Footprint 与各向异性过滤
+
+- 状态：M19.1 已通过 GitHub PR #1 合并到 `main`；M19.2 在本地分支 `feature/m19-2-anisotropic-sampling` 实施。
+- 展示目标：把 fragment shader 的 `dFdx/dFdy` 从“自动选 LOD 的黑盒”展开为可观察的 2×2 UV Jacobian、椭圆主/次轴、各向异性比率和实际 tap 数，使功能既可运行，也能用于讲解纹理缩小采样中的方向性失真。
+- 数学口径：先将 UV 导数乘以纹理尺寸得到 texel-space Jacobian；对 `J·Jᵀ` 的两个特征值开方得到 footprint major/minor axis。各向同性 LOD 取 `log2(major)`，各向异性路径取 `log2(minor)` 并沿 major axis 均匀多点采样；ratio=`major/minor`，tap count 限制为 1/2/4/8 上限内的必要数量。
+- C++/Python 对照：扩展无 Qt/GL 依赖的 texture sampling kernel，输出 major/minor、ratio、isotropic/anisotropic LOD、major direction、tap count 和 RGBA；Python 保留确定性 reference，原生 facade 继续支持 ABI 缺失时安全回退，并要求数值/颜色 parity。
+- OpenGL 实现：fragment shader 使用真实 `dFdx/dFdy` 计算 footprint；提供 isotropic trilinear 与手写最多 8 taps anisotropic 路径。新增 footprint axes、anisotropy ratio 和 tap-count 调试视图；切换只改 uniform，不重建纹理或 VBO。
+- UI：沿用独立“纹理采样”页和可滚动属性栏，增加各向异性启用、1×/2×/4×/8×预算、导数数值探针和公式化状态说明。保持主 Canvas/Document/History 完全只读。
+- 性能口径：展示理论 texture fetch 上限和实际选择 tap 数；CPU draw 时间仍只作为提交/绘制观察值，不冒充 GPU timestamp。自动动画只更新 phase uniform，不重复上传纹理、Mip 或几何。
+- 当前边界：这是可讲解的手写近似各向异性过滤，不声称替代驱动实现的完整 EWA/硬件 anisotropic filtering；本阶段不加入图片导入、sRGB、纹理压缩或 GPU timer query。
+- 验收标准：已知 Jacobian 的主/次轴与 LOD golden case；退化/非法输入处理；1/2/4/8 tap 限制；C++/Python parity；真实 OpenGL 各 debug view 画面签名不同；anisotropic 开关能降低远端方向性 shimmer；所有切换不增加 texture/VBO upload、不写 History，完整回归通过。
+
+实施后回填：
+
+- 状态：M19.2 实现完成，原生重建、136 项自动化测试与真实 OpenGL smoke 通过，等待用户 GUI 验收。
+- Python/C++ 新增相同的 `TextureFootprint` 契约：由 texel-space `J·Jᵀ` 特征值计算 major/minor axis、ratio、isotropic/anisotropic LOD、major direction 和受 1/2/4/8 预算约束的实际 taps；已知 `8×2` footprint 得到 major/minor `8/2`、LOD `3/1`、ratio/taps `4/4`。
+- 新增 major-axis trilinear multi-tap reference 与 C++ `sample_anisotropic` ABI；原生 facade 返回 RGBA、footprint 和 backend，ABI 缺失/运行异常时继续回退 Python。原生模块已通过 CMake/Ninja/MSVC 重建，颜色与所有 footprint 字段通过 parity。
+- OpenGL fragment shader 直接使用真实 `dFdx/dFdy`，各向同性路径按 major axis 选 LOD；手写各向异性路径按 minor axis 选 LOD并沿 major direction 最多执行 8 次采样。为兼容项目现有 compatibility Shader，tap clamp 使用显式整数分支，不依赖旧驱动缺失的整数 `min/max` 重载。
+- 调试视图由 3 个扩展为 6 个：最终采样、Mip level、LOD、Footprint 主/次轴、各向异性比率、实际 Tap 数。最终画面可直接切换 isotropic/anisotropic，对照远端压缩区域的方向性 shimmer 与细节保留。
+- UI 新增手写各向异性开关、1×/2×/4×/8× fetch budget 和 `dU/dx,dV/dx,dU/dy,dV/dy` 数值探针；面板同步显示椭圆轴长、ratio、两类 LOD、方向、实际 taps，以及 C++/Python RGBA 差值。全部位于原可滚动属性区，不增加主编辑器拥挤。
+- 验证结果：专项 10/10、完整回归 136/136 通过；真实 OpenGL 十种 case 均成功渲染且各调试视图签名有效，context/texture 有效，texture/VBO upload 始终为 `1/1`，动画前后 upload 不变，Shader 无错误，Canvas revision/History 保持不变。
+- GUI 验收重点：在高 tiling 下观察 isotropic 与 4×/8× anisotropic 的远端纹理稳定性；依次查看 footprint、ratio、tap-count 三个视图是否随透视位置形成连续分区；修改 derivative 探针验证 `8×2 → ratio 4:1、LOD 3/1、4 taps`；确认动画不闪退且主文档撤销历史不变。
+- 下一步：GUI 验收通过后合并 M19.2；随后进入 M20.1 HDR 浮点帧缓冲、曝光与 Reinhard/ACES tone mapping 对照，继续以“真实管线 + 数学可视化 + C++ reference”为主线。
 - GUI 验收重点：比较三种 Filter 在远端的摩尔纹与模糊；开启动画观察 shimmer；切换 Mip-color/LOD heatmap；提高 tiling；固定 L0 与 L6/L7；修改 CPU probe 并确认 C++/Python 差值为零、上传计数不随动画增长。
