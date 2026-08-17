@@ -28,6 +28,7 @@ from .glyph_atlas import (ATLAS_SIZE as GLYPH_ATLAS_SIZE, GpuTextConfig,
                           TEXT_VERTEX_STRIDE, build_text_frame)
 from .lighting_gpu import (LIGHT_VERTEX_STRIDE, build_multi_light_fan,
                            device_light_parameters, estimated_lighting_bytes)
+from .hdr_postprocess import CanvasHdrConfig
 
 
 GL_BLEND = 0x0BE2
@@ -46,9 +47,11 @@ GL_STENCIL_BUFFER_BIT = 0x00000400
 GL_COLOR_BUFFER_BIT = 0x00004000
 GL_RGBA = 0x1908
 GL_RGBA8 = 0x8058
+GL_RGBA16F = 0x881A
 GL_UNSIGNED_BYTE = 0x1401
 GL_TEXTURE0 = 0x84C0
 GL_TEXTURE_2D = 0x0DE1
+GL_FRAMEBUFFER = 0x8D40
 GL_EQUAL = 0x0202
 GL_KEEP = 0x1E00
 GL_TIME_ELAPSED = 0x88BF
@@ -125,15 +128,56 @@ precision mediump float;
 uniform sampler2D u_texture;
 uniform int u_effect;
 uniform vec2 u_texel_size;
+uniform int u_hdr_enabled;
+uniform int u_tone_mapper;
+uniform float u_exposure;
+uniform int u_hdr_debug;
+uniform int u_source_premultiplied;
 varying vec2 v_uv;
 
 float luminance(vec3 color) {
     return dot(color, vec3(0.2126, 0.7152, 0.0722));
 }
 
+vec3 tone_map(vec3 color) {
+    if (u_tone_mapper == 0) {
+        return clamp(color, 0.0, 1.0);
+    } else if (u_tone_mapper == 1) {
+        return color / (vec3(1.0) + color);
+    }
+    vec3 numerator = color * (2.51 * color + vec3(0.03));
+    vec3 denominator = color * (2.43 * color + vec3(0.59)) + vec3(0.14);
+    return clamp(numerator / denominator, 0.0, 1.0);
+}
+
+vec3 heat_color(float value) {
+    float t = clamp((log2(max(value, 0.0001)) + 4.0) / 8.0, 0.0, 1.0);
+    return clamp(vec3(1.5 * t, 1.5 - abs(2.0 * t - 1.0) * 1.5,
+                      1.5 * (1.0 - t)), 0.0, 1.0);
+}
+
 void main() {
     vec4 source = texture2D(u_texture, v_uv);
-    if (u_effect == 1) {
+    if (u_hdr_enabled == 1) {
+        float alpha = clamp(source.a, 0.0, 1.0);
+        vec3 linear_color = max(source.rgb, vec3(0.0));
+        if (u_source_premultiplied == 1 && alpha > 0.00001) {
+            linear_color /= alpha;
+        }
+        vec3 exposed = linear_color * u_exposure;
+        vec3 mapped;
+        if (u_hdr_debug == 1) {
+            mapped = heat_color(luminance(exposed));
+        } else if (u_hdr_debug == 2 &&
+                   max(exposed.r, max(exposed.g, exposed.b)) > 1.0) {
+            mapped = vec3(1.0, 0.05, 0.05);
+        } else {
+            mapped = tone_map(exposed);
+            if (u_hdr_debug == 2) mapped *= 0.35;
+            mapped = pow(max(mapped, vec3(0.0)), vec3(1.0 / 2.2));
+        }
+        gl_FragColor = vec4(mapped * alpha, alpha);
+    } else if (u_effect == 1) {
         float value = luminance(source.rgb);
         gl_FragColor = vec4(vec3(value), source.a);
     } else if (u_effect == 2) {
@@ -321,6 +365,9 @@ class _NativeOpenGLFunctions:
                                             ctypes.c_uint)
         self.glBindTexture = self._resolve(context, factory, "glBindTexture", None,
                                           ctypes.c_uint, ctypes.c_uint)
+        self.glBindFramebuffer = self._resolve(
+            context, factory, "glBindFramebuffer", None,
+            ctypes.c_uint, ctypes.c_uint)
         self.glVertexAttribDivisor = self._resolve(
             context, factory, "glVertexAttribDivisor", None,
             ctypes.c_uint, ctypes.c_uint)
@@ -445,6 +492,15 @@ class OpenGLBackend(CommandQPainterBackend):
         self.last_offscreen_ms = 0.0
         self.last_offscreen_bytes = 0
         self.last_offscreen_error = ""
+        self.hdr_config = CanvasHdrConfig()
+        self.hdr_target = None
+        self.hdr_target_size = (0, 0)
+        self.last_hdr_error = ""
+        self.last_hdr_passes = 0
+        self.last_hdr_frames = 0
+        self.last_hdr_bytes = 0
+        self.last_hdr_ms = 0.0
+        self.last_hdr_default_fbo = 0
         self._last_frame = None
         self._last_transform = None
         self._last_device_size = (0, 0)
@@ -510,6 +566,29 @@ class OpenGLBackend(CommandQPainterBackend):
         self._frame_cache = None
         self._gpu_layout_generation = -1
         self.gpu_timer_queries = None
+
+    def set_hdr_config(self, config):
+        if not isinstance(config, CanvasHdrConfig):
+            raise TypeError("config must be CanvasHdrConfig")
+        self.hdr_config = config
+
+    def hdr_state(self):
+        state = self.hdr_config.as_dict()
+        state.update({
+            "active": bool(self.hdr_config.enabled and self.hdr_target and
+                           self.hdr_target.isValid() and not self.last_hdr_error),
+            "target_valid": bool(self.hdr_target and self.hdr_target.isValid()),
+            "target_size": self.hdr_target_size,
+            "target_format": "RGBA16F + CombinedDepthStencil",
+            "target_bytes": self.last_hdr_bytes,
+            "passes": self.last_hdr_passes,
+            "frames": self.last_hdr_frames,
+            "draw_ms": self.last_hdr_ms,
+            "default_fbo": self.last_hdr_default_fbo,
+            "error": self.last_hdr_error,
+            "scope": "OpenGL vector pass；文字/实例化/2D 光照/编辑器 Overlay 后合成",
+        })
+        return state
 
     def set_picking_mode(self, mode):
         self.picking_mode = validate_picking_mode(mode)
@@ -707,6 +786,7 @@ class OpenGLBackend(CommandQPainterBackend):
             self.id_target = None
             self.color_target = None
             self.post_target = None
+            self.hdr_target = None
             self.light_mask_target = None
             self.light_target = None
         self.program = self.vertex_buffer = self.vertex_array = None
@@ -720,6 +800,8 @@ class OpenGLBackend(CommandQPainterBackend):
         self.last_id_target_revision = -1
         self.color_target = self.post_target = None
         self.offscreen_target_size = (0, 0)
+        self.hdr_target = None
+        self.hdr_target_size = (0, 0)
         self.post_program = self.post_buffer = self.post_vertex_array = None
         self._last_frame = self._last_transform = None
         self.sprite_program = self.sprite_quad_buffer = None
@@ -770,6 +852,13 @@ class OpenGLBackend(CommandQPainterBackend):
         if canvas.show_grid:
             _draw_grid(painter, canvas, viewport)
 
+        hdr_drawn = False
+        if self.hdr_config.enabled:
+            hdr_drawn = self._draw_hdr_vector_scene(
+                painter, frame, transform, device_width, device_height)
+        else:
+            self.last_hdr_passes = 0
+
         self.last_text_draw_calls = 0
         self.last_text_fallback_commands = 0
         text_commands = frame.text_commands
@@ -810,8 +899,9 @@ class OpenGLBackend(CommandQPainterBackend):
                     break
                 batch_indexes.append(command.index)
                 index += 1
-            if not self._draw_batches(painter, frame, batch_indexes, transform,
-                                      device_width, device_height):
+            if (not hdr_drawn and
+                    not self._draw_batches(painter, frame, batch_indexes, transform,
+                                           device_width, device_height)):
                 painter.restore()
                 self.fallback_active = True
                 super().render(painter, viewport)
@@ -1767,6 +1857,181 @@ class OpenGLBackend(CommandQPainterBackend):
         self.last_offscreen_bytes = estimated_target_bytes(width, height)
         return True
 
+    def _ensure_hdr_target(self, width, height):
+        size = (max(1, int(width)), max(1, int(height)))
+        if (self.hdr_target and self.hdr_target.isValid()
+                and self.hdr_target_size == size):
+            return True
+        target_format = QOpenGLFramebufferObjectFormat()
+        target_format.setAttachment(QOpenGLFramebufferObject.CombinedDepthStencil)
+        target_format.setInternalTextureFormat(GL_RGBA16F)
+        target_format.setSamples(0)
+        target = QOpenGLFramebufferObject(size[0], size[1], target_format)
+        if not target.isValid():
+            self.last_hdr_error = f"无法创建 {size[0]}×{size[1]} RGBA16F HDR FBO"
+            return False
+        self.hdr_target = target
+        self.hdr_target_size = size
+        # RGBA16F 8 B/px + estimated packed depth/stencil 4 B/px.
+        self.last_hdr_bytes = size[0] * size[1] * 12
+        return True
+
+    def _draw_hdr_vector_scene(self, painter, frame, transform, width, height):
+        started = time.perf_counter()
+        painter.beginNativePainting()
+        default_fbo = 0
+        try:
+            if (not self._ensure_resources() or not self._ensure_post_resources()
+                    or not self._ensure_hdr_target(width, height)):
+                return False
+            device = painter.device()
+            default_fbo = int(device.defaultFramebufferObject()
+                              if hasattr(device, "defaultFramebufferObject")
+                              else self.context.defaultFramebufferObject())
+            self.last_hdr_default_fbo = default_fbo
+            self.hdr_target.bind()
+            self.functions.glViewport(0, 0, int(width), int(height))
+            self.functions.glDisable(GL_SCISSOR_TEST)
+            self.functions.glDisable(GL_STENCIL_TEST)
+            self.functions.glClearColor(0.0, 0.0, 0.0, 0.0)
+            self.functions.glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)
+            if self.experiment.blend_mode == "opaque":
+                self.functions.glDisable(GL_BLEND)
+            else:
+                self.functions.glEnable(GL_BLEND)
+                destination = (GL_ONE if self.experiment.blend_mode == "additive"
+                               else GL_ONE_MINUS_SRC_ALPHA)
+                self.functions.glBlendFunc(GL_SRC_ALPHA, destination)
+            self.vertex_array.bind(); self.vertex_buffer.bind(); self.program.bind()
+            self.program.setUniformValue("u_transform", QVector4D(
+                transform.m11(), transform.m12(), transform.m21(), transform.m22()))
+            self.program.setUniformValue(
+                "u_translate", QVector2D(transform.dx(), transform.dy()))
+            self.program.setUniformValue("u_viewport", QVector2D(width, height))
+            shader_index = {"vertex_color": 0, "screen_gradient": 1,
+                            "time_pulse": 2, "coverage": 3}[
+                                self.experiment.shader_mode]
+            self.last_time_uniform = max(
+                0.0, time.perf_counter() - self._experiment_started)
+            self.program.setUniformValue("u_shader_mode", shader_index)
+            self.program.setUniformValue("u_time", self.last_time_uniform)
+            self.program.setUniformValue("u_pick_mode", 0)
+            self.program.setUniformValue(
+                "u_pick_color", QVector4D(0.0, 0.0, 0.0, 0.0))
+            self._configure_clip(width, height)
+            for batch in frame.batches:
+                self.functions.glDrawArrays(
+                    GL_TRIANGLES, batch.first_vertex, batch.vertex_count)
+            self.program.release(); self.vertex_buffer.release(); self.vertex_array.release()
+
+            self.functions.glBindFramebuffer(GL_FRAMEBUFFER, default_fbo)
+            self.functions.glViewport(0, 0, int(width), int(height))
+            self.functions.glDisable(GL_SCISSOR_TEST)
+            self.functions.glDisable(GL_STENCIL_TEST)
+            self.functions.glStencilMask(0xFF)
+            self.functions.glDisable(GL_MULTISAMPLE)
+            self.functions.glEnable(GL_BLEND)
+            # The post Shader emits premultiplied alpha so the Qt background/grid
+            # remain outside the scene HDR transform.
+            self.functions.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+            self.post_vertex_array.bind(); self.post_buffer.bind(); self.post_program.bind()
+            config = self.hdr_config
+            self.post_program.setUniformValue("u_texture", 0)
+            self.post_program.setUniformValue("u_effect", 0)
+            self.post_program.setUniformValue(
+                "u_texel_size", QVector2D(1.0 / width, 1.0 / height))
+            self.post_program.setUniformValue("u_hdr_enabled", 1)
+            self.post_program.setUniformValue(
+                "u_tone_mapper", {"linear": 0, "reinhard": 1,
+                                  "aces": 2}[config.tone_mapper])
+            self.post_program.setUniformValue("u_exposure", float(config.exposure))
+            self.post_program.setUniformValue(
+                "u_hdr_debug", {"final": 0, "heatmap": 1,
+                                "overexposure": 2}[config.debug_view])
+            self.post_program.setUniformValue(
+                "u_source_premultiplied",
+                0 if self.experiment.blend_mode == "opaque" else 1)
+            self.functions.glActiveTexture(GL_TEXTURE0)
+            self.functions.glBindTexture(GL_TEXTURE_2D, self.hdr_target.texture())
+            self.functions.glDrawArrays(GL_TRIANGLES, 0, 6)
+            self.functions.glBindTexture(GL_TEXTURE_2D, 0)
+            self.post_program.release(); self.post_buffer.release()
+            self.post_vertex_array.release()
+            self.last_hdr_passes = 2
+            self.last_hdr_frames += 1
+            self.last_hdr_error = ""
+            return True
+        except Exception as error:
+            self.last_hdr_error = str(error)
+            return False
+        finally:
+            self.last_hdr_ms = (time.perf_counter() - started) * 1000.0
+            if self.functions:
+                self.functions.glBindFramebuffer(GL_FRAMEBUFFER, default_fbo)
+            if self.functions:
+                self.functions.glViewport(0, 0, int(width), int(height))
+                self.functions.glDisable(GL_SCISSOR_TEST)
+                self.functions.glDisable(GL_STENCIL_TEST)
+                self.functions.glStencilMask(0xFF)
+                self.functions.glEnable(GL_MULTISAMPLE)
+                self.functions.glEnable(GL_BLEND)
+                self.functions.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            painter.endNativePainting()
+
+    def render_hdr_attachment(self):
+        """Render the current live HDR source into a temporary RGBA8 test image."""
+        if (self.context is None or QOpenGLContext.currentContext() is not self.context
+                or not self.hdr_target or not self.hdr_target.isValid()
+                or not self._ensure_post_resources()):
+            return None
+        width, height = self.hdr_target_size
+        format_ = QOpenGLFramebufferObjectFormat()
+        format_.setAttachment(QOpenGLFramebufferObject.NoAttachment)
+        format_.setInternalTextureFormat(GL_RGBA8)
+        target = QOpenGLFramebufferObject(width, height, format_)
+        if not target.isValid():
+            self.last_hdr_error = "无法创建 HDR 诊断输出 FBO"
+            return None
+        try:
+            target.bind()
+            self.functions.glViewport(0, 0, width, height)
+            self.functions.glDisable(GL_BLEND)
+            self.functions.glClearColor(0.0, 0.0, 0.0, 0.0)
+            self.functions.glClear(GL_COLOR_BUFFER_BIT)
+            self.post_vertex_array.bind(); self.post_buffer.bind(); self.post_program.bind()
+            config = self.hdr_config
+            self.post_program.setUniformValue("u_texture", 0)
+            self.post_program.setUniformValue("u_effect", 0)
+            self.post_program.setUniformValue(
+                "u_texel_size", QVector2D(1.0 / width, 1.0 / height))
+            self.post_program.setUniformValue("u_hdr_enabled", 1)
+            self.post_program.setUniformValue(
+                "u_tone_mapper", {"linear": 0, "reinhard": 1,
+                                  "aces": 2}[config.tone_mapper])
+            self.post_program.setUniformValue("u_exposure", float(config.exposure))
+            self.post_program.setUniformValue(
+                "u_hdr_debug", {"final": 0, "heatmap": 1,
+                                "overexposure": 2}[config.debug_view])
+            self.post_program.setUniformValue(
+                "u_source_premultiplied",
+                0 if self.experiment.blend_mode == "opaque" else 1)
+            self.functions.glActiveTexture(GL_TEXTURE0)
+            self.functions.glBindTexture(GL_TEXTURE_2D, self.hdr_target.texture())
+            self.functions.glDrawArrays(GL_TRIANGLES, 0, 6)
+            self.functions.glBindTexture(GL_TEXTURE_2D, 0)
+            self.post_program.release(); self.post_buffer.release()
+            self.post_vertex_array.release()
+            return target.toImage()
+        except Exception as error:
+            self.last_hdr_error = str(error)
+            return None
+        finally:
+            self.functions.glBindFramebuffer(
+                GL_FRAMEBUFFER, int(self.last_hdr_default_fbo))
+            self.functions.glViewport(0, 0, width, height)
+            self.functions.glEnable(GL_BLEND)
+            self.functions.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
     def render_offscreen_attachment(self, effect="none", scale=1,
                                     attachment="postprocess"):
         """Run a manual two-pass render and return a readback QImage."""
@@ -1846,6 +2111,11 @@ class OpenGLBackend(CommandQPainterBackend):
             effect_index = {"none": 0, "grayscale": 1, "invert": 2, "edge": 3}[effect]
             self.post_program.setUniformValue("u_texture", 0)
             self.post_program.setUniformValue("u_effect", effect_index)
+            self.post_program.setUniformValue("u_hdr_enabled", 0)
+            self.post_program.setUniformValue("u_tone_mapper", 0)
+            self.post_program.setUniformValue("u_exposure", 1.0)
+            self.post_program.setUniformValue("u_hdr_debug", 0)
+            self.post_program.setUniformValue("u_source_premultiplied", 0)
             self.post_program.setUniformValue(
                 "u_texel_size", QVector2D(1.0 / width, 1.0 / height))
             self.functions.glActiveTexture(GL_TEXTURE0)

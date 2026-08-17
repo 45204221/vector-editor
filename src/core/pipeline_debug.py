@@ -248,6 +248,14 @@ def build_pipeline_snapshot(canvas, backend, view_transform, device_size,
         "draw_calls": 0, "upload_count": 0, "fallback_commands": 0,
         "error": "",
     }
+    hdr_getter = getattr(backend, "hdr_state", None)
+    hdr = hdr_getter() if hdr_getter else {
+        "enabled": False, "active": False, "tone_mapper": "inactive",
+        "exposure": 1.0, "debug_view": "final", "target_valid": False,
+        "target_size": (0, 0), "target_format": "inactive",
+        "target_bytes": 0, "passes": 0, "frames": 0, "draw_ms": 0.0,
+        "error": "", "scope": "inactive",
+    }
     stages = (
         ("1  Document", f"{shape_count} shapes · revision {cache.revision}"),
         ("2  Geometry", f"{source_primitive_count} visible RenderPrimitive"),
@@ -265,6 +273,10 @@ def build_pipeline_snapshot(canvas, backend, view_transform, device_size,
          f"{instancing['draw_calls']} draw · "
          f"{gpu_text['rendered_glyphs'] if gpu_text['enabled'] else 0} glyphs · "
          f"{gpu_text['draw_calls']} text draw"),
+        ("10 HDR / Tone Mapping",
+         (f"RGBA16F {hdr['target_size']} → {hdr['tone_mapper']} · "
+          f"exposure {hdr['exposure']:.2f} · {hdr['debug_view']}"
+          if hdr["enabled"] else "disabled · direct canvas output")),
     )
     state = (
         ("后端", backend_name),
@@ -315,6 +327,15 @@ def build_pipeline_snapshot(canvas, backend, view_transform, device_size,
          f"fallback {gpu_text['fallback_commands']} · "
          f"resources={gpu_text['resources_valid']}"),
         ("GPU Text 错误", gpu_text["error"] or "—"),
+        ("Canvas HDR", f"enabled/active={hdr['enabled']}/{hdr['active']} · "
+         f"{hdr['tone_mapper']} · exposure {hdr['exposure']:.2f} · "
+         f"view {hdr['debug_view']}"),
+        ("HDR RenderTarget", f"{hdr['target_size']} · {hdr['target_format']} · "
+         f"{hdr['target_bytes'] / (1024 * 1024):.2f} MiB"),
+        ("HDR Pass", f"{hdr['passes']} · frames {hdr['frames']} · "
+         f"{hdr['draw_ms']:.3f} ms"),
+        ("HDR 合成范围", hdr["scope"]),
+        ("HDR 错误", hdr["error"] or "—"),
     )
     return PipelineSnapshot(
         backend_name, cache.revision, selected_shape_id, stages, state,
@@ -323,7 +344,9 @@ def build_pipeline_snapshot(canvas, backend, view_transform, device_size,
         f"float32 interleaved ({', '.join(VERTEX_COMPONENTS)}) · {VERTEX_STRIDE_BYTES} bytes",
         ("Vertex: scene position → device → clip; Fragment: "
          f"{experiment['shader_mode']} → {experiment['blend_mode']} blend; "
-         f"clip={experiment['effective_clip_mode']}"),
+         f"clip={experiment['effective_clip_mode']}; "
+         + (f"RGBA16F → {hdr['tone_mapper']}({hdr['exposure']:.2f}x) → gamma 2.2"
+            if hdr["enabled"] else "direct framebuffer output")),
         "Overdraw 为基于真实三角形的透明叠加近似，不是硬件 fragment 精确计数。",
     )
 
