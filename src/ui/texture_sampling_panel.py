@@ -15,9 +15,10 @@ from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
                              QWidget, QOpenGLWidget)
 
 from core.native_texture import (generate_mipmaps, runtime_error,
-                                 sample_texture)
+                                 sample_anisotropic, sample_texture)
 from core.texture_sampling import (build_checker_texture,
                                    generate_mipmaps as python_generate,
+                                   sample_anisotropic as python_anisotropic,
                                    sample_mipmaps as python_sample)
 from .pipeline3d_panel import _PipelineGLFunctions
 
@@ -51,13 +52,25 @@ uniform sampler2D u_texture;
 uniform vec2 u_texture_size;
 uniform float u_max_lod;
 uniform int u_view;
+uniform int u_anisotropic;
+uniform int u_max_taps;
 varying vec2 v_uv;
 
-float estimated_lod() {
+void footprint(out float major_axis, out float minor_axis,
+               out float ratio, out vec2 major_direction) {
     vec2 dx = dFdx(v_uv * u_texture_size);
     vec2 dy = dFdy(v_uv * u_texture_size);
-    float rho = max(length(dx), length(dy));
-    return clamp(log2(max(rho, 0.000001)), 0.0, u_max_lod);
+    float a = dx.x * dx.x + dy.x * dy.x;
+    float b = dx.x * dx.y + dy.x * dy.y;
+    float c = dx.y * dx.y + dy.y * dy.y;
+    float root = sqrt(max(0.0, (a-c)*(a-c) + 4.0*b*b));
+    major_axis = sqrt(max(0.0, 0.5 * (a+c+root)));
+    minor_axis = sqrt(max(0.0, 0.5 * (a+c-root)));
+    vec2 candidate = abs(b) > 0.000001
+        ? vec2(major_axis * major_axis - c, b)
+        : (a >= c ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+    major_direction = normalize(candidate);
+    ratio = max(1.0, max(1.0, major_axis) / max(1.0, minor_axis));
 }
 
 vec3 lod_color(float value) {
@@ -67,12 +80,44 @@ vec3 lod_color(float value) {
 }
 
 void main() {
-    vec4 sampled = texture2D(u_texture, v_uv);
-    float lod = estimated_lod();
+    float major_axis, minor_axis, ratio;
+    vec2 major_direction;
+    footprint(major_axis, minor_axis, ratio, major_direction);
+    float isotropic_lod = clamp(log2(max(1.0, major_axis)), 0.0, u_max_lod);
+    float anisotropic_lod = clamp(log2(max(1.0, minor_axis)), 0.0, u_max_lod);
+    int taps = int(ceil(ratio - 0.000001));
+    if (taps < 1) taps = 1;
+    if (taps > u_max_taps) taps = u_max_taps;
+    vec4 sampled = vec4(0.0);
+    if (u_anisotropic != 0) {
+        float span = max(0.0, major_axis - max(1.0, minor_axis));
+        float bias = anisotropic_lod - isotropic_lod;
+        for (int index = 0; index < 8; ++index) {
+            if (index < taps) {
+                float offset = ((float(index) + 0.5) / float(taps) - 0.5) * span;
+                sampled += texture2D(u_texture,
+                    v_uv + major_direction * offset / u_texture_size, bias);
+            }
+        }
+        sampled /= float(taps);
+    } else {
+        sampled = texture2D(u_texture, v_uv);
+        taps = 1;
+    }
+    float lod = u_anisotropic != 0 ? anisotropic_lod : isotropic_lod;
     if (u_view == 1) {
         gl_FragColor = vec4(mix(sampled.rgb, lod_color(floor(lod + 0.5)), 0.68), 1.0);
     } else if (u_view == 2) {
         gl_FragColor = vec4(lod_color(lod), 1.0);
+    } else if (u_view == 3) {
+        gl_FragColor = vec4(clamp(vec3(major_axis / 16.0,
+            minor_axis / 16.0, 0.5 + 0.5 * major_direction.x), 0.0, 1.0), 1.0);
+    } else if (u_view == 4) {
+        float heat = clamp(log2(ratio) / 3.0, 0.0, 1.0);
+        gl_FragColor = vec4(heat, 1.0 - heat, 0.15, 1.0);
+    } else if (u_view == 5) {
+        float heat = float(taps - 1) / 7.0;
+        gl_FragColor = vec4(heat, 0.3, 1.0 - heat, 1.0);
     } else {
         gl_FragColor = sampled;
     }
@@ -91,6 +136,8 @@ class TextureSamplingViewport(QOpenGLWidget):
         self.view_mode = "final"
         self.repeat = True
         self.manual_lod = False
+        self.anisotropic = False
+        self.max_taps = 8
         self.lod_level = 0
         self.tiling = 16.0
         self.phase = 0.0
@@ -202,8 +249,12 @@ class TextureSamplingViewport(QOpenGLWidget):
             self.program.setUniformValue("u_max_lod", float(self.max_lod))
             self.program.setUniformValue("u_tiling", float(self.tiling))
             self.program.setUniformValue("u_phase", float(self.phase))
+            self.program.setUniformValue("u_anisotropic", int(self.anisotropic))
+            self.program.setUniformValue("u_max_taps", int(self.max_taps))
             self.program.setUniformValue(
-                "u_view", {"final": 0, "mip_color": 1, "lod_heatmap": 2}[self.view_mode])
+                "u_view", {"final": 0, "mip_color": 1, "lod_heatmap": 2,
+                           "footprint": 3, "anisotropy": 4,
+                           "tap_count": 5}[self.view_mode])
             self.functions.glDrawArrays(GL_TRIANGLES, 0, 6)
             self.program.release(); self.buffer.release(); self.vertex_array.release()
             self.texture.release()
@@ -268,13 +319,21 @@ class TextureSamplingPanel(QWidget):
         self.filter_combo.setCurrentIndex(2)
         self.view_combo = QComboBox()
         for label, value in (("最终采样", "final"), ("Mip level 着色", "mip_color"),
-                             ("LOD 热力图", "lod_heatmap")):
+                             ("LOD 热力图", "lod_heatmap"),
+                             ("Footprint 主/次轴", "footprint"),
+                             ("各向异性比率", "anisotropy"),
+                             ("实际 Tap 数", "tap_count")):
             self.view_combo.addItem(label, value)
         self.tiling_slider = QSlider(Qt.Horizontal); self.tiling_slider.setRange(1, 32)
         self.tiling_slider.setValue(16)
         self.repeat_check = QCheckBox("Repeat wrap"); self.repeat_check.setChecked(True)
         self.animate_check = QCheckBox("UV phase 动画（观察 shimmer）")
         self.manual_lod_check = QCheckBox("手动固定 Mip level")
+        self.anisotropic_check = QCheckBox("手写各向异性过滤")
+        self.tap_combo = QComboBox()
+        for taps in (1, 2, 4, 8):
+            self.tap_combo.addItem(f"{taps}×", taps)
+        self.tap_combo.setCurrentIndex(3)
         self.lod_slider = QSlider(Qt.Horizontal)
         self.lod_slider.setRange(0, len(self.mip_levels) - 1)
         self.lod_slider.setEnabled(False)
@@ -283,6 +342,8 @@ class TextureSamplingPanel(QWidget):
         render_form.addRow("Texture tiling", self.tiling_slider)
         render_form.addRow(self.repeat_check)
         render_form.addRow(self.animate_check)
+        render_form.addRow(self.anisotropic_check)
+        render_form.addRow("Max anisotropic taps", self.tap_combo)
         render_form.addRow(self.manual_lod_check)
         render_form.addRow("Mip level", self.lod_slider)
         controls_layout.addWidget(render_group)
@@ -297,6 +358,17 @@ class TextureSamplingPanel(QWidget):
         self.probe_lod.setDecimals(3); self.probe_lod.setValue(2.5)
         probe_form.addRow("U", self.probe_u); probe_form.addRow("V", self.probe_v)
         probe_form.addRow("LOD", self.probe_lod)
+        self.derivative_spins = []
+        defaults = (8.0 / self.texture_size, 0.0, 0.0,
+                    2.0 / self.texture_size)
+        for label, value in zip(("dU/dx", "dV/dx", "dU/dy", "dV/dy"), defaults):
+            control = QDoubleSpinBox(); control.setRange(-1.0, 1.0)
+            control.setDecimals(6); control.setSingleStep(1.0 / self.texture_size)
+            control.setValue(value); self.derivative_spins.append(control)
+            probe_form.addRow(label, control)
+        self.footprint_label = QLabel(); self.footprint_label.setWordWrap(True)
+        self.footprint_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        probe_form.addRow(self.footprint_label)
         self.probe_label = QLabel(); self.probe_label.setWordWrap(True)
         self.probe_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         probe_form.addRow(self.probe_label)
@@ -324,14 +396,17 @@ class TextureSamplingPanel(QWidget):
         splitter.addWidget(scroll); splitter.setStretchFactor(0, 3); splitter.setStretchFactor(1, 2)
         splitter.setSizes([760, 420]); layout.addWidget(splitter, 1)
 
-        for control in (self.filter_combo, self.view_combo, self.tiling_slider,
-                        self.repeat_check, self.manual_lod_check, self.lod_slider):
+        for control in (self.filter_combo, self.view_combo, self.tap_combo,
+                        self.tiling_slider, self.repeat_check,
+                        self.anisotropic_check, self.manual_lod_check,
+                        self.lod_slider):
             signal = (control.currentIndexChanged if isinstance(control, QComboBox)
                       else control.toggled if isinstance(control, QCheckBox)
                       else control.valueChanged)
             signal.connect(self._controls_changed)
         self.animate_check.toggled.connect(self._animation_changed)
-        for control in (self.probe_u, self.probe_v, self.probe_lod):
+        for control in (self.probe_u, self.probe_v, self.probe_lod,
+                        *self.derivative_spins):
             control.valueChanged.connect(self._update_probe)
 
     def _controls_changed(self, *args):
@@ -342,6 +417,8 @@ class TextureSamplingPanel(QWidget):
             repeat=self.repeat_check.isChecked(),
             manual_lod=self.manual_lod_check.isChecked(),
             lod_level=self.lod_slider.value(),
+            anisotropic=self.anisotropic_check.isChecked(),
+            max_taps=self.tap_combo.currentData(),
             tiling=float(self.tiling_slider.value()))
         self._update_probe()
 
@@ -364,8 +441,27 @@ class TextureSamplingPanel(QWidget):
             self.probe_u.value(), self.probe_v.value(), self.probe_lod.value(),
             filter_mode, self.repeat_check.isChecked())
         difference = tuple(abs(native[index] - reference[index]) for index in range(4))
+        derivatives = tuple(control.value() for control in self.derivative_spins)
+        aniso_native, footprint, aniso_backend = sample_anisotropic(
+            self.base_rgba, self.texture_size, self.texture_size,
+            self.probe_u.value(), self.probe_v.value(), *derivatives,
+            self.tap_combo.currentData(), self.repeat_check.isChecked())
+        aniso_reference, reference_footprint = python_anisotropic(
+            self.python_mip_levels, self.probe_u.value(), self.probe_v.value(),
+            *derivatives, self.tap_combo.currentData(), self.repeat_check.isChecked())
+        aniso_difference = tuple(abs(aniso_native[index] - aniso_reference[index])
+                                 for index in range(4))
         self.probe_label.setText(
-            f"{backend}: RGBA {native}\nPython: RGBA {reference} · |Δ| {difference}")
+            f"Isotropic {backend}: {native} · Python {reference} · |Δ| {difference}\n"
+            f"Anisotropic {aniso_backend}: {aniso_native} · Python "
+            f"{aniso_reference} · |Δ| {aniso_difference}")
+        self.footprint_label.setText(
+            f"Ellipse major/minor {footprint.major:.3f}/{footprint.minor:.3f} texels · "
+            f"ratio {footprint.ratio:.2f}:1 · taps {footprint.taps}/"
+            f"{self.tap_combo.currentData()}\n"
+            f"LOD isotropic/aniso {footprint.isotropic_lod:.3f}/"
+            f"{footprint.anisotropic_lod:.3f} · major dir "
+            f"({footprint.direction_u:.3f}, {footprint.direction_v:.3f})")
 
     def refresh(self, *args):
         state = self.viewport.runtime_state()
@@ -376,6 +472,9 @@ class TextureSamplingPanel(QWidget):
             f"L0 {self.texture_size}² → L{len(self.mip_levels)-1} 1²\n"
             f"CPU chain {mip_bytes / 1024:.1f} KiB · GPU texture ≈"
             f"{mip_bytes / 1024:.1f} KiB · Filter {self.filter_combo.currentText()}\n"
+            f"Anisotropic {'ON' if self.anisotropic_check.isChecked() else 'OFF'} · "
+            f"fetch budget ≤ {self.tap_combo.currentData()} taps/fragment · "
+            f"Debug {self.view_combo.currentText()}\n"
             f"GL context/texture {state['context_valid']}/{state['texture_valid']} · "
             f"uploads texture/VBO {state['texture_uploads']}/{state['geometry_uploads']} · "
             f"frames {state['frame_count']} · draw {state['draw_ms']:.3f} ms"

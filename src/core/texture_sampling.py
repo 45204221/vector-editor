@@ -14,6 +14,18 @@ class MipLevel:
     rgba: bytes
 
 
+@dataclass(frozen=True)
+class TextureFootprint:
+    major: float
+    minor: float
+    ratio: float
+    isotropic_lod: float
+    anisotropic_lod: float
+    direction_u: float
+    direction_v: float
+    taps: int
+
+
 def build_checker_texture(size=256):
     size = int(size)
     if size <= 0 or size > 2048:
@@ -109,3 +121,65 @@ def sample_mipmaps(levels, u, v, lod, filter="nearest", repeat=True):
         values = tuple(low[channel] + (high[channel] - low[channel]) * blend
                        for channel in range(4))
     return tuple(max(0, min(255, math.floor(value + 0.5))) for value in values)
+
+
+def texture_footprint(width, height, dudx, dvdx, dudy, dvdy, max_taps=8):
+    """Return the texel-space ellipse implied by a 2x2 UV Jacobian."""
+    width, height, max_taps = int(width), int(height), int(max_taps)
+    values = tuple(map(float, (dudx, dvdx, dudy, dvdy)))
+    if width <= 0 or height <= 0:
+        raise ValueError("texture dimensions must be positive")
+    if max_taps not in (1, 2, 4, 8):
+        raise ValueError("max_taps must be 1, 2, 4 or 8")
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("texture derivatives must be finite")
+    dudx, dvdx, dudy, dvdy = values
+    dx = (dudx * width, dvdx * height)
+    dy = (dudy * width, dvdy * height)
+    # Eigenvalues of J*J^T are the squared ellipse axis lengths.
+    a = dx[0] * dx[0] + dy[0] * dy[0]
+    b = dx[0] * dx[1] + dy[0] * dy[1]
+    c = dx[1] * dx[1] + dy[1] * dy[1]
+    root = math.sqrt(max(0.0, (a - c) * (a - c) + 4.0 * b * b))
+    major = math.sqrt(max(0.0, 0.5 * (a + c + root)))
+    minor = math.sqrt(max(0.0, 0.5 * (a + c - root)))
+    if abs(b) > 1e-12:
+        direction = (major * major - c, b)
+    elif a >= c:
+        direction = (1.0, 0.0)
+    else:
+        direction = (0.0, 1.0)
+    length = math.hypot(*direction)
+    direction = ((direction[0] / length, direction[1] / length)
+                 if length > 1e-12 else (1.0, 0.0))
+    major_lod_axis = max(1.0, major)
+    minor_lod_axis = max(1.0, minor)
+    ratio = max(1.0, major_lod_axis / minor_lod_axis)
+    taps = min(max_taps, max(1, int(math.ceil(ratio - 1e-12))))
+    return TextureFootprint(
+        major, minor, ratio, math.log2(major_lod_axis),
+        math.log2(minor_lod_axis), direction[0], direction[1], taps)
+
+
+def sample_anisotropic(levels, u, v, dudx, dvdx, dudy, dvdy,
+                       max_taps=8, repeat=True):
+    """Approximate anisotropic filtering with trilinear taps on the major axis."""
+    levels = tuple(levels)
+    if not levels:
+        raise ValueError("mip chain cannot be empty")
+    footprint = texture_footprint(
+        levels[0].width, levels[0].height, dudx, dvdx, dudy, dvdy, max_taps)
+    span = max(0.0, footprint.major - max(1.0, footprint.minor))
+    direction_u = footprint.direction_u / levels[0].width
+    direction_v = footprint.direction_v / levels[0].height
+    total = [0.0, 0.0, 0.0, 0.0]
+    for index in range(footprint.taps):
+        offset = ((index + 0.5) / footprint.taps - 0.5) * span
+        color = sample_mipmaps(
+            levels, u + direction_u * offset, v + direction_v * offset,
+            footprint.anisotropic_lod, "trilinear", repeat)
+        for channel in range(4):
+            total[channel] += color[channel]
+    color = tuple(max(0, min(255, math.floor(
+        value / footprint.taps + 0.5))) for value in total)
+    return color, footprint

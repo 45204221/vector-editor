@@ -132,4 +132,72 @@ std::array<std::uint8_t, 4> sample_mipmaps(
     return bytes(mixed);
 }
 
+TextureFootprint texture_footprint(
+        int width, int height, double dudx, double dvdx, double dudy,
+        double dvdy, int max_taps) {
+    if (width <= 0 || height <= 0) {
+        throw std::invalid_argument("texture dimensions must be positive");
+    }
+    if (max_taps != 1 && max_taps != 2 && max_taps != 4 && max_taps != 8) {
+        throw std::invalid_argument("max_taps must be 1, 2, 4 or 8");
+    }
+    if (!std::isfinite(dudx) || !std::isfinite(dvdx) ||
+            !std::isfinite(dudy) || !std::isfinite(dvdy)) {
+        throw std::invalid_argument("texture derivatives must be finite");
+    }
+    const double dx_u = dudx * width, dx_v = dvdx * height;
+    const double dy_u = dudy * width, dy_v = dvdy * height;
+    const double a = dx_u * dx_u + dy_u * dy_u;
+    const double b = dx_u * dx_v + dy_u * dy_v;
+    const double c = dx_v * dx_v + dy_v * dy_v;
+    const double root = std::sqrt(std::max(0.0,
+        (a - c) * (a - c) + 4.0 * b * b));
+    TextureFootprint result;
+    result.major = std::sqrt(std::max(0.0, 0.5 * (a + c + root)));
+    result.minor = std::sqrt(std::max(0.0, 0.5 * (a + c - root)));
+    double direction_u = 1.0, direction_v = 0.0;
+    if (std::abs(b) > 1e-12) {
+        direction_u = result.major * result.major - c;
+        direction_v = b;
+    } else if (a < c) {
+        direction_u = 0.0; direction_v = 1.0;
+    }
+    const double direction_length = std::hypot(direction_u, direction_v);
+    if (direction_length > 1e-12) {
+        direction_u /= direction_length; direction_v /= direction_length;
+    }
+    result.direction_u = direction_u; result.direction_v = direction_v;
+    const double major_lod_axis = std::max(1.0, result.major);
+    const double minor_lod_axis = std::max(1.0, result.minor);
+    result.ratio = std::max(1.0, major_lod_axis / minor_lod_axis);
+    result.isotropic_lod = std::log2(major_lod_axis);
+    result.anisotropic_lod = std::log2(minor_lod_axis);
+    result.taps = std::min(max_taps, std::max(1,
+        static_cast<int>(std::ceil(result.ratio - 1e-12))));
+    return result;
+}
+
+std::pair<std::array<std::uint8_t, 4>, TextureFootprint> sample_anisotropic(
+        const std::vector<TextureLevel>& levels, double u, double v,
+        double dudx, double dvdx, double dudy, double dvdy, int max_taps,
+        bool repeat) {
+    if (levels.empty()) throw std::invalid_argument("mip chain cannot be empty");
+    const auto footprint = texture_footprint(
+        levels[0].width, levels[0].height, dudx, dvdx, dudy, dvdy, max_taps);
+    const double span = std::max(0.0,
+        footprint.major - std::max(1.0, footprint.minor));
+    const double direction_u = footprint.direction_u / levels[0].width;
+    const double direction_v = footprint.direction_v / levels[0].height;
+    std::array<double, 4> total{};
+    for (int index = 0; index < footprint.taps; ++index) {
+        const double offset = ((index + 0.5) / footprint.taps - 0.5) * span;
+        const auto color = sample_mipmaps(
+            levels, u + direction_u * offset, v + direction_v * offset,
+            footprint.anisotropic_lod, "trilinear", repeat);
+        for (int channel = 0; channel < 4; ++channel) total[channel] += color[channel];
+    }
+    for (double& value : total) value /= footprint.taps;
+    return {bytes(total), footprint};
+}
+
 }  // namespace vector_engine
