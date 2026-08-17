@@ -34,13 +34,16 @@ def main():
     panel, failures, report = window.texture_sampling_panel, [], {}
     revision = window.canvas.render_revision
     history = window.canvas.history_manager.current_index
-    cases = (("nearest", "final", False, 0),
-             ("bilinear", "final", False, 0),
-             ("trilinear", "final", False, 0),
-             ("trilinear", "mip_color", False, 0),
-             ("trilinear", "lod_heatmap", False, 0),
-             ("trilinear", "final", True, 0),
-             ("trilinear", "final", True, 7))
+    cases = (("nearest", "final", False, 0, False),
+             ("bilinear", "final", False, 0, False),
+             ("trilinear", "final", False, 0, False),
+             ("trilinear", "final", False, 0, True),
+             ("trilinear", "mip_color", False, 0, True),
+             ("trilinear", "lod_heatmap", False, 0, True),
+             ("trilinear", "footprint", False, 0, True),
+             ("trilinear", "anisotropy", False, 0, True),
+             ("trilinear", "tap_count", False, 0, True),
+             ("trilinear", "final", True, 7, False))
 
     def run_case(index=0):
         if index >= len(cases):
@@ -49,17 +52,19 @@ def main():
             panel.animate_check.setChecked(True)
             QTimer.singleShot(260, lambda: finish(before_phase, before_uploads))
             return
-        filter_mode, view_mode, manual, level = cases[index]
+        filter_mode, view_mode, manual, level, anisotropic = cases[index]
         panel.filter_combo.setCurrentIndex(panel.filter_combo.findData(filter_mode))
         panel.view_combo.setCurrentIndex(panel.view_combo.findData(view_mode))
         panel.manual_lod_check.setChecked(manual)
+        panel.anisotropic_check.setChecked(anisotropic)
         panel.lod_slider.setValue(level)
         panel.viewport.update()
         QTimer.singleShot(180, lambda: capture(index, filter_mode, view_mode,
-                                               manual, level))
+                                               manual, level, anisotropic))
 
-    def capture(index, filter_mode, view_mode, manual, level):
-        key = f"{filter_mode}:{view_mode}:manual={manual}:L{level}"
+    def capture(index, filter_mode, view_mode, manual, level, anisotropic):
+        key = (f"{filter_mode}:{view_mode}:manual={manual}:L{level}:"
+               f"aniso={anisotropic}")
         report[key] = signature(panel.viewport.grabFramebuffer())
         run_case(index + 1)
 
@@ -75,7 +80,7 @@ def main():
         required = (state["context_valid"] and state["texture_valid"] and
                     not state["error"] and state["texture_uploads"] == 1 and
                     state["geometry_uploads"] == 1 and
-                    len(set(hashes.values())) >= 5 and
+                    len(set(hashes.values())) >= 8 and
                     panel.phase != before_phase and
                     panel.viewport.texture_uploads == before_uploads and
                     window.canvas.render_revision == revision and

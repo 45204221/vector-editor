@@ -412,6 +412,32 @@ PyObject* py_sample_texture(PyObject*, PyObject* args, PyObject* kwargs) {
     }
 }
 
+PyObject* py_sample_anisotropic(PyObject*, PyObject* args, PyObject* kwargs) {
+    PyObject* rgba_object = nullptr;
+    int width = 0, height = 0, max_taps = 8, repeat = 1;
+    double u = 0.0, v = 0.0, dudx = 0.0, dvdx = 0.0, dudy = 0.0, dvdy = 0.0;
+    static const char* names[] = {"rgba", "width", "height", "u", "v",
+        "dudx", "dvdx", "dudy", "dvdy", "max_taps", "repeat", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oiiddddddip",
+            const_cast<char**>(names), &rgba_object, &width, &height, &u, &v,
+            &dudx, &dvdx, &dudy, &dvdy, &max_taps, &repeat)) return nullptr;
+    std::vector<std::uint8_t> rgba;
+    if (!parse_rgba_buffer(rgba_object, rgba)) return nullptr;
+    try {
+        const auto levels = vector_engine::generate_mipmaps(rgba, width, height);
+        const auto result = vector_engine::sample_anisotropic(
+            levels, u, v, dudx, dvdx, dudy, dvdy, max_taps, repeat != 0);
+        const auto& color = result.first;
+        const auto& footprint = result.second;
+        return Py_BuildValue("(BBBBdddddddi)", color[0], color[1], color[2],
+            color[3], footprint.major, footprint.minor, footprint.ratio,
+            footprint.isotropic_lod, footprint.anisotropic_lod,
+            footprint.direction_u, footprint.direction_v, footprint.taps);
+    } catch (const std::exception& error) {
+        PyErr_SetString(PyExc_ValueError, error.what()); return nullptr;
+    }
+}
+
 PyMethodDef methods[] = {
     {"tessellate_stroke", reinterpret_cast<PyCFunction>(py_tessellate_stroke),
      METH_VARARGS | METH_KEYWORDS, "Tessellate a polyline into 2D triangles."},
@@ -433,6 +459,9 @@ PyMethodDef methods[] = {
     {"sample_texture", reinterpret_cast<PyCFunction>(py_sample_texture),
      METH_VARARGS | METH_KEYWORDS,
      "Sample an RGBA8 mip chain with nearest, bilinear or trilinear filtering."},
+    {"sample_anisotropic", reinterpret_cast<PyCFunction>(py_sample_anisotropic),
+     METH_VARARGS | METH_KEYWORDS,
+     "Sample an RGBA8 mip chain along a derivative footprint major axis."},
     {nullptr, nullptr, 0, nullptr},
 };
 
