@@ -8,6 +8,7 @@ from .pipeline_panel import PipelinePanel
 from .instancing_panel import InstancingPanel
 from .lighting_panel import LightingPanel
 from .pipeline3d_panel import Pipeline3DPanel
+from .texture_sampling_panel import TextureSamplingPanel
 
 
 class EngineLabWindow(QMainWindow):
@@ -18,6 +19,7 @@ class EngineLabWindow(QMainWindow):
     INSTANCING_PAGE = 2
     LIGHTING_PAGE = 3
     PIPELINE3D_PAGE = 4
+    TEXTURE_SAMPLING_PAGE = 5
 
     def __init__(self, canvas, graphics_view, parent=None):
         super().__init__(parent, Qt.Window)
@@ -49,11 +51,13 @@ class EngineLabWindow(QMainWindow):
         self.instancing_panel = InstancingPanel(graphics_view)
         self.lighting_panel = LightingPanel(graphics_view)
         self.pipeline3d_panel = Pipeline3DPanel(canvas)
+        self.texture_sampling_panel = TextureSamplingPanel(canvas)
         self.pages.addTab(self.pipeline_panel, "渲染管线")
         self.pages.addTab(self.performance_panel, "性能分析")
-        self.pages.addTab(self.instancing_panel, "纹理/实例化")
+        self.pages.addTab(self.instancing_panel, "Atlas/实例化")
         self.pages.addTab(self.lighting_panel, "2D 光照/阴影")
         self.pages.addTab(self.pipeline3d_panel, "3D 渲染管线")
+        self.pages.addTab(self.texture_sampling_panel, "纹理采样/LOD")
         self.pages.currentChanged.connect(self._refresh_current_page)
         self.setCentralWidget(central)
 
@@ -64,6 +68,7 @@ class EngineLabWindow(QMainWindow):
             "instancing": self.INSTANCING_PAGE,
             "lighting": self.LIGHTING_PAGE,
             "pipeline3d": self.PIPELINE3D_PAGE,
+            "texture_sampling": self.TEXTURE_SAMPLING_PAGE,
         }.get(page)
         if index is None:
             raise ValueError(f"Unknown engine lab page: {page}")
@@ -84,6 +89,8 @@ class EngineLabWindow(QMainWindow):
             self.lighting_panel.refresh()
         elif index == self.PIPELINE3D_PAGE:
             self.pipeline3d_panel.refresh()
+        elif index == self.TEXTURE_SAMPLING_PAGE:
+            self.texture_sampling_panel.refresh()
 
     def closeEvent(self, event):
         # Preserve selected tabs, previews and sampling state between openings.

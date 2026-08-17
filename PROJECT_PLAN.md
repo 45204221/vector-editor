@@ -1471,3 +1471,35 @@ C++ 读取固定的 24-byte 顶点格式和 draw command；Python 仍管理 Qt �
 - 分支策略：`main` 保持已验证阶段；后续阶段使用 `feature/m19-texture-sampling` 等功能分支，完成自动化和 GUI 验收后合并。重要阶段使用带注释标签，例如 M18 基线为 `v0.18.3`。
 - 提交规范：采用 `feat/fix/test/docs/refactor/perf/build` 前缀；结构设计先进入本计划，再实施并回填结果。
 - GitHub 边界：首次本地提交前执行敏感文件名/内容模式和大文件检查；远程仓库默认建议 public 作品集，但实际可见性与账号归属必须由用户确认。认证使用 Git Credential Manager、GitHub CLI 浏览器登录或 PAT，不将凭据写入仓库或 remote URL。
+
+### 2026-08-16 / M19.1 纹理采样、Mipmap 与 LOD 可视化
+
+- 状态：M18.3 GUI 已验收并建立 `v0.18.3` Git 基线；M19.1 在本地分支 `feature/m19-texture-sampling` 实施。
+- 展示目标：用同一高频程序化纹理和透视压缩平面，直观解释纹理放大/缩小时的走样来源，以及 Nearest、Bilinear、Trilinear 和 Mipmap/LOD 之间的质量与成本关系。页面必须同时给出画面、Mip 链、LOD 热力图、数值采样和资源统计。
+- 页面结构：Engine Lab 新增独立第六页“纹理采样/LOD”；原“纹理/实例化”更名为“Atlas/实例化”。新页采用左侧真实 OpenGL viewport、右侧独立滚动属性区的 splitter，最小窗口下仍可访问全部控件，不向主编辑器 Dock 追加内容。
+- CPU/C++ reference：新增无 Qt 依赖的 C++17 RGBA8 texture kernel；2×2 box filter 逐级生成至 1×1，奇数边界 clamp；支持 repeat/clamp UV 和 nearest、bilinear、trilinear 采样。Python reference 使用完全相同的 texel-center、wrap、rounding 与 LOD 规则，原生 facade 在 ABI 缺失或异常时安全回退。
+- GPU 路径：独立 QOpenGLWidget/context 创建程序化 RGBA8 base texture、完整 mip levels、Shader/VAO/VBO；硬件过滤模式分别映射 NEAREST、LINEAR、LINEAR_MIPMAP_LINEAR。透视梯形使用 perspective-correct UV，在远端产生强 minification；纹理 tiling 与 phase 只更新 uniform。
+- LOD：自动模式由隐式 texture sampling 使用 fragment derivatives；Shader 同时用 `dFdx/dFdy` 和 base texture size 估算 `lambda=log2(rho)`。手动 LOD 通过限定纹理 base/max level选择指定 mip，页面显示请求级别、最大级别与当前估算区间。
+- 调试视图：Final 显示真实纹理采样；Mip color 按估算 LOD 叠加离散级别颜色；LOD heatmap 将 0..max level 映射为冷暖色。CPU 区显示全部 mip 缩略链，并提供 U/V/LOD 数值探针，报告 C++ 与 Python RGBA 差异。
+- 动态演示：可选 UV phase 动画只更新 uniform，用于观察 nearest/bilinear 的 temporal shimmer 与 trilinear 的稳定性；纹理和几何配置未变化时不重新上传 texture/VBO。页面隐藏时停止 timer，避免后台持续占用 GPU。
+- 数据源与边界：首片只使用 256×256 确定性 checker/grid 程序纹理，避免文件格式/色彩空间问题混入基础采样概念；不进入二维 Canvas、Layer、Serializer、History 或主 OpenGL backend，不与 M17 3D context 共享资源。
+- 资源预算：256² RGBA8 完整 mip 链约为 base 的 4/3，即约 341 KiB；CPU bytes chain 与 GPU texture 各一份，预览 QImage/Pixmap 为额外缓存。最多 9 levels、32× tiling、无离屏大附件，动画约 30 FPS 且仅页面可见时运行。
+- 自动化标准：程序纹理确定性；level 尺寸/数量/1×1 终点；2×2 box golden value；repeat/clamp、nearest/bilinear/trilinear golden samples；非法尺寸/过滤器；C++/Python 所有 mip bytes 与 probe parity；UI 页面、History 中立、隐藏 timer；完整既有回归。
+- 真实 OpenGL 标准：context/Shader/texture 有效；三种过滤和三种调试视图生成可区分 framebuffer signature；手动 mip 0 与高 mip 可视差异；动画只增加 frame/uniform 状态、不增加 texture upload；关闭重开资源稳定且无 error。
+- Git 分工：Codex 负责本地分支、差异、测试与 commit；用户完成 GUI 验收后在 PyCharm 推送功能分支并管理 GitHub PR/merge。M19.1 未验收前不创建正式里程碑标签。
+
+实施后回填：
+
+- 状态：M19.1 实现完成，C++ 原生重建、134 项自动化测试和真实 OpenGL smoke 通过，等待用户 GUI 验收。
+- 新增 C++17 `texture_sampling.hpp/.cpp`：RGBA8 输入限制为 1..2048，2×2 box filter 生成完整链；奇数尺寸使用 ceil-halving 并 clamp 最后 texel，避免边缘被丢弃。采样使用 OpenGL 风格 texel-center 坐标，支持 repeat/clamp、nearest、bilinear 与跨相邻 level 的 trilinear。
+- CPython binding 新增 `generate_mipmaps` 与 `sample_texture`；`native_texture.py` 提供 C++ 优先和旧 ABI/运行异常 Python 回退。`texture_sampling.py` 是无 Qt 的确定性 reference，并生成 256² 高频 4 px checker + 32 px 橙色 grid 测试纹理。
+- Engine Lab 扩展为六个一级页：原页更名为“Atlas/实例化”，新增独立“纹理采样/LOD”。页面采用不可折叠 splitter，左侧真实 QOpenGLWidget，右侧滚动控制、CPU probe、完整 Mip 缩略链和资源状态；主窗口引擎菜单提供直接入口。
+- GPU viewport 使用单个透视梯形和 perspective-correct UV，256² RGBA8 base 由 QOpenGLTexture 上传并调用真实 `generateMipMaps()`；Nearest/Linear/LinearMipMapLinear 分别对应三种过滤。手动 level 仅改变 `GL_TEXTURE_BASE_LEVEL/MAX_LEVEL`，不重新上传 texture。
+- Fragment Shader 使用 `dFdx/dFdy(v_uv * texture_size)` 估算 footprint 与 `log2(rho)` LOD；Final、离散 Mip-color overlay 和连续 LOD heatmap 三个模式共享同一次真实采样。Texture tiling 1..32 可改变 minification 压力。
+- UV phase 动画约 30 FPS，只更新 `u_phase` 并重绘；页面隐藏时 timer 停止。真实验证动画从 phase 0 运行到 0.03、frame count 23，texture/VBO upload 始终保持 1/1。
+- CPU 探针公开 U/V/LOD/filter/wrap，并同时显示 C++ 与 Python RGBA 及绝对差；定向 parity 覆盖链上全部 bytes 和多组越界 UV/小数 LOD，差值为零。
+- 256² 完整 9-level 链从 L0 256² 到 L8 1²，占约 341.3 KiB；CPU chain 和 GPU texture 各一份。Mip 缩略图使用缓存 QImage/Pixmap，不在动画帧重建。
+- 自动化新增确定性纹理、链尺寸、2×2 golden、奇数边缘、过滤/wrap golden、非法契约、C++ parity、页面布局、History 中立和隐藏 timer；完整测试由 126 增至 134，结果 134/134。
+- 真实 OpenGL 4.6：Nearest/Bilinear/Trilinear、Mip-color、LOD heatmap、手动 L0/L7 均成功输出；七种配置得到六种不同 framebuffer signature（Bilinear auto 与手动 L0 在当前场景等价是预期行为），context/texture 有效且无错误。既有 M17/M18 3D smoke 也完整通过。
+- 当前边界：M19.1 固定使用线性 RGBA8 程序纹理，暂不引入图片文件、sRGB/gamma、压缩纹理或各向异性扩展；这些不会干扰本阶段对基本 footprint、Mip 和过滤规则的讲解。M19.2 再扩展 sample footprint、anisotropic taps 与性能/质量对照。
+- GUI 验收重点：比较三种 Filter 在远端的摩尔纹与模糊；开启动画观察 shimmer；切换 Mip-color/LOD heatmap；提高 tiling；固定 L0 与 L6/L7；修改 CPU probe 并确认 C++/Python 差值为零、上传计数不随动画增长。

@@ -228,9 +228,12 @@ class MainWindow(QMainWindow):
         performance_action = QAction("打开性能分析", self)
         performance_action.triggered.connect(self.show_performance_panel)
         engine_menu.addAction(performance_action)
-        instancing_action = QAction("打开纹理/实例化实验", self)
+        instancing_action = QAction("打开 Atlas/实例化实验", self)
         instancing_action.triggered.connect(self.show_instancing_panel)
         engine_menu.addAction(instancing_action)
+        texture_sampling_action = QAction("打开纹理采样/LOD 实验", self)
+        texture_sampling_action.triggered.connect(self.show_texture_sampling_panel)
+        engine_menu.addAction(texture_sampling_action)
         lighting_action = QAction("打开 2D 光照/阴影实验", self)
         lighting_action.triggered.connect(self.show_lighting_panel)
         pipeline3d_action = QAction("打开 3D 渲染管线实验", self)
@@ -379,6 +382,7 @@ class MainWindow(QMainWindow):
         self.instancing_panel = self.engine_lab_window.instancing_panel
         self.lighting_panel = self.engine_lab_window.lighting_panel
         self.pipeline3d_panel = self.engine_lab_window.pipeline3d_panel
+        self.texture_sampling_panel = self.engine_lab_window.texture_sampling_panel
 
     def setup_connections(self) -> None:
         """设置信号连接"""
@@ -419,6 +423,9 @@ class MainWindow(QMainWindow):
 
     def show_pipeline3d_panel(self):
         self.engine_lab_window.show_page("pipeline3d")
+
+    def show_texture_sampling_panel(self):
+        self.engine_lab_window.show_page("texture_sampling")
 
     def set_command_rendering(self, enabled):
         self.graphics_view.set_command_rendering(enabled)
