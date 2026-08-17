@@ -1526,4 +1526,31 @@ C++ 读取固定的 24-byte 顶点格式和 draw command；Python 仍管理 Qt �
 - 验证结果：专项 10/10、完整回归 136/136 通过；真实 OpenGL 十种 case 均成功渲染且各调试视图签名有效，context/texture 有效，texture/VBO upload 始终为 `1/1`，动画前后 upload 不变，Shader 无错误，Canvas revision/History 保持不变。
 - GUI 验收重点：在高 tiling 下观察 isotropic 与 4×/8× anisotropic 的远端纹理稳定性；依次查看 footprint、ratio、tap-count 三个视图是否随透视位置形成连续分区；修改 derivative 探针验证 `8×2 → ratio 4:1、LOD 3/1、4 taps`；确认动画不闪退且主文档撤销历史不变。
 - 下一步：GUI 验收通过后合并 M19.2；随后进入 M20.1 HDR 浮点帧缓冲、曝光与 Reinhard/ACES tone mapping 对照，继续以“真实管线 + 数学可视化 + C++ reference”为主线。
+
+### 2026-08-17 / M20.1 主画布 OpenGL HDR 后处理
+
+- 状态：M19.2 已通过 GitHub PR #2 合并到 `main`；M20.1 在本地分支 `feature/m20-canvas-hdr` 实施。
+- 路线调整：不新建独立 HDR/3D 实验视口，也不在本切片重构完整 Forward/Deferred 管线。复用主画布 `OpenGLBackend` 已有 FBO、fullscreen quad 和后处理 Shader，将现有“手动附件预览”能力扩展为可选的实时画布 HDR vector pass。
+- 实时管线：Canvas/GPU arena → OpenGL vector triangles → RGBA16F scene FBO → exposure → Linear Clamp/Reinhard/ACES → 固定 gamma 2.2 → 当前 `QOpenGLWidget`；网格先由 Qt 绘制，HDR 结果以带 alpha 的 fullscreen quad 合成，其后再绘制 Qt/GPU 文字、实例化实验、2D 光照、选中框和调试 overlay，保证编辑操作提示清晰。
+- 可视模式：最终 Tone Mapping、HDR 亮度热力图、过曝遮罩。热力图显示浮点亮度分布；遮罩以红色标出 exposure 后任一通道超过 1.0 的区域。高 exposure 或现有 additive blend 用于产生可观察的 HDR 输入。
+- 配置/UI：新增独立、不可序列化的 `CanvasHdrConfig`（enabled、operator、exposure、debug view），放在引擎实验室“渲染管线/Shader 实验”的紧凑分组中；非 OpenGL 后端保留配置并提示未激活。任何参数变化只更新 uniform/scene，不进入 Canvas、保存或 History。
+- C++/Python：实现 Linear、Reinhard、ACES 三种 RGB Tone Mapping 的无 Qt/GL 参考函数，固定 gamma 2.2；Python reference 与可选 C++ ABI 对固定 HDR 输入进行 parity，Shader 使用相同公式。
+- 兼容边界：首版 HDR 只处理文档的 OpenGL vector triangle pass；文字、实例化、2D 灯光和编辑器 overlay 作为显示/UI层在 Tone Mapping 后合成。这一边界避免改变文字 z-order、Glyph Atlas、lighting mask 和 QGraphicsView 交互语义，状态面板必须明确显示。
+- 资源与回退：实时目标只保留一张 viewport-size RGBA16F + depth/stencil FBO，约 12 B/px；resize 时重建，关闭 HDR 时不执行额外 pass。FBO/Shader 失败自动回到既有直接绘制路径并报告错误，不允许黑屏或退出。
+- 验收标准：三种算子 golden case 与 C++/Python parity；HDR 开关/算子/exposure/debug view 不写 History；真实 OpenGL 中 Linear/Reinhard/ACES/heatmap/overexposure 画面签名不同；HDR target 为 RGBA16F 且 resize 有效；参数变化不增加 arena geometry upload；关闭 HDR 与原基线画面一致；文字、选择框和交互仍可用。
+
+实施后回填：
+
+- 状态：M20.1 实现完成，C++ 原生重建、141 项自动化测试、真实 Canvas HDR/OpenGL 离屏/OpenGL 光栅 smoke 均通过，等待用户 GUI 验收。
+- 新增 `CanvasHdrConfig` 与独立 `hdr_experiment_changed`：enabled、Linear/Reinhard/ACES、exposure `0.05..8.0`、final/heatmap/overexposure 均只存在于运行时；切换后端时配置可保留，所有变更只触发 scene update，不触碰文档 revision、保存或 History。
+- `OpenGLBackend` 新增 viewport-size `RGBA16F + CombinedDepthStencil` 实时目标。开启后将 arena 中全部文档 vector batches 一次写入浮点 FBO，再以已有 fullscreen quad 合成到 `QOpenGLWidget.defaultFramebufferObject()`；关闭后仍走原直接绘制路径。
+- HDR 场景附件以透明背景保存；alpha/ additive 路径按 premultiplied 语义在后处理 Shader 中恢复线性颜色，Tone Mapping 后再以 `ONE, ONE_MINUS_SRC_ALPHA` 合成，因此 Qt 白色画布与网格留在下层，文字、Glyph Atlas、实例化、2D 光照、选择框和调试 overlay 留在上层且不参与曝光。
+- 后处理 Shader 保留原图/灰度/反相/边缘检测逻辑，并增加统一的 Linear Clamp、Reinhard、Narkowicz ACES approximation、固定 gamma 2.2、对数亮度热力图和过曝红色遮罩。现有手动附件预览显式关闭 HDR uniforms，不受实时配置污染。
+- C++17 新增 `tone_mapping.hpp/.cpp` 和 `tone_map_rgb` CPython ABI；Python reference/native facade 使用相同公式和验证规则。固定 HDR 颜色在三种算子、两组 exposure 下达到双精度 parity；实验面板实时显示 `(4,2,0.5)` 的 C++ 输出及最大差值。
+- 引擎实验室“渲染管线/Shader 实验”增加一个紧凑 HDR 分组，不新增一级窗口或主编辑器 Dock；阶段表由 9 项扩展为 10 项，明确显示 `RGBA16F → Tone Mapping → gamma 2.2`，GPU 状态页显示目标格式/尺寸/资源、pass/frame、耗时、作用范围与错误。
+- 资源/回退：目标资源估算为 `12 B/px`，仅在启用且 viewport resize 时重建；FBO/Shader/合成失败会记录错误并在同一帧恢复既有 direct vector path。诊断读取使用临时 RGBA8 FBO，不成为常驻实时资源。
+- 验证结果：完整回归 141/141；真实 OpenGL additive 场景的 Linear、Reinhard、ACES、heatmap、overexposure 五种输出 SHA-1 均不同；resize 后目标从 `370×579` 重建为 `510×639`（约 `3.73 MiB`），2 passes、无 GL 错误，HDR 参数切换前后 arena upload 计数 `1→1`，Canvas revision/history 不变；HDR 与真实 8-bit Stencil 裁剪同时启用也通过。
+- 兼容回归：原 RGBA8 一倍/二倍离屏附件、灰度、反相、边缘检测、ID FBO 全部有效；主画布八组 Shader/Alpha/Additive/Opaque/Scissor/Stencil 真实 OpenGL case 全部无 fallback。
+- GUI 验收重点：切换到实验性 OpenGL 后端，在画布绘制重叠亮色图元；使用 screen-gradient + additive、exposure 约 `3.0`，依次观察 Linear 高光截断、Reinhard/ACES 细节差异、热力图和红色过曝遮罩；确认文字/网格/选择框清晰，窗口 resize、拖动/撤销、关闭 HDR 和后端切换均正常。
+- 下一步：GUI 验收通过后合并 M20.1。后续优先讨论是否把同一共享 Tone Mapping 配置复用到 3D viewport；Bloom、自动曝光和直方图继续保持后移，不与本切片捆绑。
 - GUI 验收重点：比较三种 Filter 在远端的摩尔纹与模糊；开启动画观察 shimmer；切换 Mip-color/LOD heatmap；提高 tiling；固定 L0 与 L6/L7；修改 CPU probe 并确认 C++/Python 差值为零、上传计数不随动画增长。
