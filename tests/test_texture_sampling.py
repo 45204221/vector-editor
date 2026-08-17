@@ -12,7 +12,8 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QSplitter
 from core import native_texture
 from core.texture_sampling import (MipLevel, build_checker_texture,
-                                   generate_mipmaps, sample_mipmaps)
+                                   generate_mipmaps, sample_anisotropic,
+                                   sample_mipmaps, texture_footprint)
 from ui.main_window import MainWindow
 
 
@@ -70,6 +71,32 @@ class TextureSamplingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sample_mipmaps((MipLevel(1, 1, b"\0\0\0\xff"),),
                            0, 0, 0, "unknown")
+        with self.assertRaises(ValueError):
+            texture_footprint(256, 256, 0.1, 0, 0, 0.1, 3)
+
+    def test_footprint_axes_lod_and_tap_budget(self):
+        footprint = texture_footprint(
+            256, 256, 8 / 256, 0, 0, 2 / 256, 8)
+        self.assertAlmostEqual(footprint.major, 8.0)
+        self.assertAlmostEqual(footprint.minor, 2.0)
+        self.assertAlmostEqual(footprint.ratio, 4.0)
+        self.assertAlmostEqual(footprint.isotropic_lod, 3.0)
+        self.assertAlmostEqual(footprint.anisotropic_lod, 1.0)
+        self.assertEqual(footprint.taps, 4)
+        self.assertAlmostEqual(abs(footprint.direction_u), 1.0)
+        self.assertAlmostEqual(footprint.direction_v, 0.0)
+        self.assertEqual(texture_footprint(
+            256, 256, 16 / 256, 0, 0, 1 / 256, 2).taps, 2)
+
+    def test_anisotropic_sampling_is_deterministic(self):
+        levels = generate_mipmaps(build_checker_texture(64), 64, 64)
+        first, footprint = sample_anisotropic(
+            levels, 0.13, 0.27, 8 / 64, 0, 0, 2 / 64, 8)
+        second, _ = sample_anisotropic(
+            levels, 0.13, 0.27, 8 / 64, 0, 0, 2 / 64, 8)
+        self.assertEqual(first, second)
+        self.assertEqual(footprint.taps, 4)
+        self.assertTrue(all(0 <= channel <= 255 for channel in first))
 
     @unittest.skipUnless(native_texture.is_available(), "native texture ABI not built")
     def test_cpp_python_mip_and_sample_parity(self):
@@ -87,6 +114,15 @@ class TextureSamplingTests(unittest.TestCase):
                     self.assertEqual(sample_backend, "C++ native")
                     self.assertEqual(color, sample_mipmaps(
                         reference, u, v, lod, filter_mode, repeat))
+        actual, footprint, backend = native_texture.sample_anisotropic(
+            source, 32, 32, 0.21, 0.37, 8 / 32, 0, 0, 2 / 32, 8, True)
+        expected, expected_footprint = sample_anisotropic(
+            reference, 0.21, 0.37, 8 / 32, 0, 0, 2 / 32, 8, True)
+        self.assertEqual(backend, "C++ native")
+        self.assertEqual(actual, expected)
+        for field in expected_footprint.__dataclass_fields__:
+            self.assertAlmostEqual(getattr(footprint, field),
+                                   getattr(expected_footprint, field))
 
 
 class TextureSamplingPanelTests(unittest.TestCase):
@@ -101,10 +137,15 @@ class TextureSamplingPanelTests(unittest.TestCase):
         self.assertEqual(len(panel.mip_levels), 9)
         panel.filter_combo.setCurrentIndex(0)
         panel.view_combo.setCurrentIndex(2)
+        panel.anisotropic_check.setChecked(True)
+        panel.tap_combo.setCurrentIndex(panel.tap_combo.findData(4))
         panel.manual_lod_check.setChecked(True); panel.lod_slider.setValue(6)
         panel.probe_u.setValue(1.25); panel.probe_v.setValue(-0.25)
         APP.processEvents()
         self.assertIn("|Δ| (0, 0, 0, 0)", panel.probe_label.text())
+        self.assertIn("ratio", panel.footprint_label.text())
+        self.assertTrue(panel.viewport.anisotropic)
+        self.assertEqual(panel.viewport.max_taps, 4)
         self.assertEqual(window.canvas.render_revision, revision)
         self.assertEqual(window.canvas.history_manager.current_index, history)
         panel.animate_check.setChecked(True); APP.processEvents()
