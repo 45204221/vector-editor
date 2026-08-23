@@ -13,6 +13,7 @@ add_library(vector_engine_native MODULE
     src/mesh_extrusion.cpp
     src/software_rasterizer.cpp
     src/texture_sampling.cpp
+    src/tone_mapping.cpp
     python_bindings/module.cpp
 )
 target_include_directories(vector_engine_native PRIVATE include)

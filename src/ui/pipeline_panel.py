@@ -3,8 +3,8 @@
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QHeaderView, QLabel, QMessageBox,
+    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+    QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
     QPushButton, QScrollArea, QFrame, QTableWidget, QTableWidgetItem,
     QTabWidget, QTextEdit,
     QVBoxLayout, QWidget,
@@ -14,6 +14,9 @@ from core.pipeline_debug import PipelineDebugMode
 from core.raster_experiments import BLEND_MODES, CLIP_MODES, SHADER_MODES
 from core.offscreen_experiments import (ATTACHMENT_VIEWS, OFFSCREEN_SCALES,
                                         PICKING_MODES, POSTPROCESS_MODES)
+from core.hdr_postprocess import (HDR_DEBUG_VIEWS, TONE_MAPPERS,
+                                  tone_map_rgb as python_tone_map)
+from core import native_hdr
 
 
 MODE_LABELS = (
@@ -50,6 +53,7 @@ class PipelinePanel(QWidget):
         graphics_view.pipeline_snapshot_changed.connect(self._refresh_if_visible)
         graphics_view.raster_experiment_changed.connect(self._refresh_if_visible)
         graphics_view.offscreen_experiment_changed.connect(self._refresh_if_visible)
+        graphics_view.hdr_experiment_changed.connect(self._refresh_if_visible)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -128,6 +132,32 @@ class PipelinePanel(QWidget):
         reset_button = QPushButton("恢复实验默认值")
         reset_button.clicked.connect(self.graphics_view.reset_raster_experiment)
         experiment_layout.addWidget(reset_button)
+
+        hdr_group = QGroupBox("主画布 HDR 后处理")
+        hdr_form = QFormLayout(hdr_group)
+        self.hdr_enabled_check = QCheckBox("启用实时 RGBA16F vector pass")
+        self.hdr_enabled_check.toggled.connect(self._hdr_changed)
+        self.hdr_tone_combo = self._experiment_combo(TONE_MAPPERS, self._hdr_changed)
+        self.hdr_exposure_spin = QDoubleSpinBox()
+        self.hdr_exposure_spin.setRange(0.05, 8.0)
+        self.hdr_exposure_spin.setDecimals(2)
+        self.hdr_exposure_spin.setSingleStep(0.25)
+        self.hdr_exposure_spin.setValue(1.0)
+        self.hdr_exposure_spin.valueChanged.connect(self._hdr_changed)
+        self.hdr_debug_combo = self._experiment_combo(
+            HDR_DEBUG_VIEWS, self._hdr_changed)
+        hdr_form.addRow(self.hdr_enabled_check)
+        hdr_form.addRow("Tone Mapper", self.hdr_tone_combo)
+        hdr_form.addRow("Exposure", self.hdr_exposure_spin)
+        hdr_form.addRow("显示阶段", self.hdr_debug_combo)
+        hdr_reset = QPushButton("恢复 HDR 默认值")
+        hdr_reset.clicked.connect(self.graphics_view.reset_canvas_hdr)
+        hdr_form.addRow(hdr_reset)
+        self.hdr_state_label = QLabel()
+        self.hdr_state_label.setWordWrap(True)
+        self.hdr_state_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        hdr_form.addRow(self.hdr_state_label)
+        experiment_layout.addWidget(hdr_group)
         self.experiment_state_label = QLabel()
         self.experiment_state_label.setWordWrap(True)
         self.experiment_state_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -221,6 +251,13 @@ class PipelinePanel(QWidget):
     def _picking_changed(self):
         self.graphics_view.set_picking_mode(self.picking_combo.currentData())
 
+    def _hdr_changed(self):
+        if not hasattr(self, "hdr_debug_combo"):
+            return
+        self.graphics_view.set_canvas_hdr(
+            self.hdr_enabled_check.isChecked(), self.hdr_tone_combo.currentData(),
+            self.hdr_exposure_spin.value(), self.hdr_debug_combo.currentData())
+
     def _offscreen_config_changed(self):
         if not hasattr(self, "offscreen_scale_combo"):
             return
@@ -305,6 +342,33 @@ class PipelinePanel(QWidget):
             f"约 {state['offscreen_bytes'] / (1024 * 1024):.1f} MiB"
             f"{warning or (chr(10) + '提示：' + state['offscreen_error'] if state['offscreen_error'] else '')}")
 
+    def _refresh_hdr(self):
+        state = self.graphics_view.canvas_hdr_state()
+        self.hdr_enabled_check.blockSignals(True)
+        self.hdr_enabled_check.setChecked(state["enabled"])
+        self.hdr_enabled_check.blockSignals(False)
+        self._select_data(self.hdr_tone_combo, state["tone_mapper"])
+        self._select_data(self.hdr_debug_combo, state["debug_view"])
+        self.hdr_exposure_spin.blockSignals(True)
+        self.hdr_exposure_spin.setValue(state["exposure"])
+        self.hdr_exposure_spin.blockSignals(False)
+        sample = (4.0, 2.0, 0.5)
+        native, backend = native_hdr.tone_map_rgb(
+            sample, state["exposure"], state["tone_mapper"])
+        reference = python_tone_map(
+            sample, state["exposure"], state["tone_mapper"])
+        difference = max(abs(native[index] - reference[index]) for index in range(3))
+        self.hdr_state_label.setText(
+            f"{'实时生效' if state['active'] else '未激活'} · {state['target_format']} "
+            f"{state['target_size']} · {state['target_bytes'] / (1024 * 1024):.2f} MiB\n"
+            f"Pass {state['passes']} · frames {state['frames']} · "
+            f"draw {state['draw_ms']:.3f} ms\n"
+            f"Reference {backend}: HDR {sample} → "
+            f"({native[0]:.4f}, {native[1]:.4f}, {native[2]:.4f}) · "
+            f"C++/Python max |Δ| {difference:.2e}\n"
+            f"范围：{state['scope']}"
+            + (f"\n错误：{state['error']}" if state["error"] else ""))
+
     def showEvent(self, event):
         super().showEvent(event)
         self.timer.start()
@@ -340,6 +404,7 @@ class PipelinePanel(QWidget):
     def refresh(self):
         self._refresh_experiment()
         self._refresh_offscreen()
+        self._refresh_hdr()
         try:
             snapshot = self.graphics_view.pipeline_snapshot()
         except Exception as error:

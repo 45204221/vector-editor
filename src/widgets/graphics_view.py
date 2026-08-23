@@ -24,6 +24,7 @@ from core.glyph_atlas import GpuTextConfig
 from core.lighting_experiment import (MAX_LIGHTS, LightSource, LightingConfig,
                                       build_lighting_snapshot, draw_lighting_debug,
                                       rebind_lighting_snapshot)
+from core.hdr_postprocess import CanvasHdrConfig
 
 
 class GraphicsView(QGraphicsView):
@@ -39,6 +40,7 @@ class GraphicsView(QGraphicsView):
     instancing_experiment_changed = pyqtSignal()
     gpu_text_experiment_changed = pyqtSignal()
     lighting_experiment_changed = pyqtSignal()
+    hdr_experiment_changed = pyqtSignal()
 
     def __init__(self, canvas: Canvas, parent=None):
         super().__init__(parent)
@@ -86,6 +88,7 @@ class GraphicsView(QGraphicsView):
         self.postprocess_mode = "none"
         self.attachment_view = "postprocess"
         self.offscreen_scale = 1
+        self.hdr_config = CanvasHdrConfig()
         self.instancing_config = InstancingConfig()
         self.gpu_text_config = GpuTextConfig()
         self.lighting_config = LightingConfig(
@@ -281,6 +284,7 @@ class GraphicsView(QGraphicsView):
             backend.set_picking_mode(self.picking_mode)
             backend.set_instancing_config(self.instancing_config)
             backend.set_gpu_text_config(self.gpu_text_config)
+            backend.set_hdr_config(self.hdr_config)
         else:
             backend = CommandQPainterBackend(self.canvas) if backend_name == "command" else QPainterBackend()
             if isinstance(old_viewport, QOpenGLWidget):
@@ -303,6 +307,7 @@ class GraphicsView(QGraphicsView):
         self.instancing_experiment_changed.emit()
         self.gpu_text_experiment_changed.emit()
         self.lighting_experiment_changed.emit()
+        self.hdr_experiment_changed.emit()
 
     def set_raster_experiment(self, shader_mode=None, blend_mode=None,
                               clip_mode=None) -> None:
@@ -323,6 +328,39 @@ class GraphicsView(QGraphicsView):
         defaults = RasterExperimentConfig()
         self.set_raster_experiment(defaults.shader_mode, defaults.blend_mode,
                                    defaults.clip_mode)
+
+    def set_canvas_hdr(self, enabled=None, tone_mapper=None, exposure=None,
+                       debug_view=None):
+        updated = self.hdr_config.changed(
+            enabled, tone_mapper, exposure, debug_view)
+        if updated == self.hdr_config:
+            return
+        self.hdr_config = updated
+        backend = self.render_item.backend
+        if isinstance(backend, OpenGLBackend):
+            backend.set_hdr_config(updated)
+        self.scene.update()
+        self.pipeline_snapshot_changed.emit()
+        self.hdr_experiment_changed.emit()
+
+    def reset_canvas_hdr(self):
+        defaults = CanvasHdrConfig()
+        self.set_canvas_hdr(defaults.enabled, defaults.tone_mapper,
+                            defaults.exposure, defaults.debug_view)
+
+    def canvas_hdr_state(self):
+        backend = self.render_item.backend
+        if isinstance(backend, OpenGLBackend):
+            return backend.hdr_state()
+        state = self.hdr_config.as_dict()
+        state.update({
+            "active": False, "target_valid": False, "target_size": (0, 0),
+            "target_format": "RGBA16F + CombinedDepthStencil",
+            "target_bytes": 0, "passes": 0, "frames": 0, "draw_ms": 0.0,
+            "error": "当前后端不是 OpenGL；配置已保留。",
+            "scope": "OpenGL vector pass；文字/实例化/2D 光照/编辑器 Overlay 后合成",
+        })
+        return state
 
     def _update_shader_timer(self) -> None:
         animate = (isinstance(self.render_item.backend, OpenGLBackend) and
@@ -722,6 +760,7 @@ class GraphicsView(QGraphicsView):
             offscreen = backend.offscreen_state()
             instancing = backend.instancing_state()
             gpu_text = backend.gpu_text_state()
+            hdr = backend.hdr_state()
             return (f"OpenGL 已激活 | GPU 顶点: {backend.last_gpu_vertices} "
                     f"| 批次: {backend.last_gpu_batches} | 上传: {backend.last_upload_kind.value} "
                     f"{backend.last_upload_bytes} B/{backend.last_upload_ranges} 段 "
@@ -736,7 +775,9 @@ class GraphicsView(QGraphicsView):
                     f"| Pick: {offscreen['picking_mode']} "
                     f"ID-FBO: {'ready' if offscreen['target_valid'] else 'off'} "
                     f"| Instances: {instancing['count'] if instancing['enabled'] else 'off'} "
-                    f"| GPU Text: {gpu_text['rendered_glyphs'] if gpu_text['enabled'] else 'off'}")
+                    f"| GPU Text: {gpu_text['rendered_glyphs'] if gpu_text['enabled'] else 'off'}"
+                    + (f" | HDR: {hdr['tone_mapper']} {hdr['exposure']:.2f}x "
+                       f"{hdr['debug_view']}" if hdr["enabled"] else " | HDR: off"))
         if isinstance(backend, CommandQPainterBackend):
             return f"命令缓冲 QPainter | 指令: {backend.last_primitive_count}"
         return "传统 QPainter"

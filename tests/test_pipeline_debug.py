@@ -103,7 +103,7 @@ class PipelinePanelTests(unittest.TestCase):
         self.assertEqual(window.graphics_view.render_item.pipeline_mode, "wireframe")
         self.assertEqual(window.canvas.history_manager.current_index, history_index)
         self.assertEqual(window.canvas.render_revision, revision)
-        self.assertEqual(window.pipeline_panel.stage_table.rowCount(), 9)
+        self.assertEqual(window.pipeline_panel.stage_table.rowCount(), 10)
         window.engine_lab_window.close()
         self.assertFalse(window.engine_lab_window.isVisible())
         window.close()
