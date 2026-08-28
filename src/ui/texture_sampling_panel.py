@@ -1,6 +1,7 @@
 """M19 texture filtering, mipmap and LOD visualization laboratory."""
 
 import math
+import os
 import struct
 import time
 
@@ -10,14 +11,16 @@ from PyQt5.QtGui import (QImage, QOpenGLBuffer, QOpenGLShader,
                          QOpenGLVertexArrayObject, QOpenGLVersionProfile,
                          QVector2D)
 from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
-                             QGroupBox, QHBoxLayout, QLabel, QPushButton,
+                             QFileDialog, QGroupBox, QHBoxLayout, QLabel, QPushButton,
                              QScrollArea, QSlider, QSplitter, QVBoxLayout,
                              QWidget, QOpenGLWidget)
 
-from core.native_texture import (generate_mipmaps, runtime_error,
+from core.native_texture import (generate_mipmaps, generate_mipmaps_srgb,
+                                 runtime_error,
                                  sample_anisotropic, sample_texture)
 from core.texture_sampling import (build_checker_texture,
                                    generate_mipmaps as python_generate,
+                                   generate_mipmaps_srgb as python_generate_srgb,
                                    sample_anisotropic as python_anisotropic,
                                    sample_mipmaps as python_sample)
 from .pipeline3d_panel import _PipelineGLFunctions
@@ -54,6 +57,7 @@ uniform float u_max_lod;
 uniform int u_view;
 uniform int u_anisotropic;
 uniform int u_max_taps;
+uniform int u_encode_srgb;
 varying vec2 v_uv;
 
 void footprint(out float major_axis, out float minor_axis,
@@ -77,6 +81,14 @@ vec3 lod_color(float value) {
     float t = value / max(1.0, u_max_lod);
     return clamp(vec3(1.5 * t, 1.5 - abs(2.0 * t - 1.0) * 1.5,
                       1.5 * (1.0 - t)), 0.0, 1.0);
+}
+
+vec3 linear_to_srgb(vec3 value) {
+    vec3 low = value * 12.92;
+    vec3 high = 1.055 * pow(max(value, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+    return vec3(value.r <= 0.0031308 ? low.r : high.r,
+                value.g <= 0.0031308 ? low.g : high.g,
+                value.b <= 0.0031308 ? low.b : high.b);
 }
 
 void main() {
@@ -105,8 +117,10 @@ void main() {
         taps = 1;
     }
     float lod = u_anisotropic != 0 ? anisotropic_lod : isotropic_lod;
+    vec3 display_sampled = u_encode_srgb != 0
+        ? linear_to_srgb(sampled.rgb) : sampled.rgb;
     if (u_view == 1) {
-        gl_FragColor = vec4(mix(sampled.rgb, lod_color(floor(lod + 0.5)), 0.68), 1.0);
+        gl_FragColor = vec4(mix(display_sampled, lod_color(floor(lod + 0.5)), 0.68), 1.0);
     } else if (u_view == 2) {
         gl_FragColor = vec4(lod_color(lod), 1.0);
     } else if (u_view == 3) {
@@ -119,7 +133,7 @@ void main() {
         float heat = float(taps - 1) / 7.0;
         gl_FragColor = vec4(heat, 0.3, 1.0 - heat, 1.0);
     } else {
-        gl_FragColor = sampled;
+        gl_FragColor = vec4(display_sampled, sampled.a);
     }
 }
 """
@@ -128,10 +142,14 @@ void main() {
 class TextureSamplingViewport(QOpenGLWidget):
     state_changed = pyqtSignal()
 
-    def __init__(self, base_rgba, texture_size, parent=None):
+    def __init__(self, base_rgba, texture_width, texture_height,
+                 mip_levels, parent=None):
         super().__init__(parent)
         self.base_rgba = bytes(base_rgba)
-        self.texture_size = int(texture_size)
+        self.texture_width = int(texture_width)
+        self.texture_height = int(texture_height)
+        self.mip_levels = tuple(mip_levels)
+        self.color_space = "linear"
         self.filter_mode = "trilinear"
         self.view_mode = "final"
         self.repeat = True
@@ -143,19 +161,56 @@ class TextureSamplingViewport(QOpenGLWidget):
         self.phase = 0.0
         self.functions = self.program = self.buffer = self.vertex_array = None
         self.texture = None
+        self.texture_pending = True
         self.texture_uploads = self.geometry_uploads = 0
         self.draw_calls = self.frame_count = 0
         self.draw_ms = 0.0
+        self.compressed_texture_support = "尚未初始化 OpenGL context"
         self.last_error = ""
         self.setMinimumSize(430, 380)
 
     @property
     def max_lod(self):
-        return int(math.floor(math.log2(self.texture_size)))
+        return len(self.mip_levels) - 1
+
+    def set_source(self, rgba, width, height, mip_levels, color_space):
+        self.base_rgba = bytes(rgba)
+        self.texture_width, self.texture_height = int(width), int(height)
+        self.mip_levels = tuple(mip_levels)
+        self.color_space = str(color_space)
+        self.texture_pending = True
+        self.update()
+
+    def _upload_texture(self):
+        if self.texture is not None:
+            self.texture.destroy()
+        texture = QOpenGLTexture(QOpenGLTexture.Target2D)
+        texture.setFormat(QOpenGLTexture.SRGB8_Alpha8 if self.color_space == "srgb"
+                          else QOpenGLTexture.RGBA8_UNorm)
+        texture.setSize(self.texture_width, self.texture_height)
+        texture.setMipLevels(len(self.mip_levels))
+        texture.allocateStorage(QOpenGLTexture.RGBA, QOpenGLTexture.UInt8)
+        for index, level in enumerate(self.mip_levels):
+            texture.setData(index, QOpenGLTexture.RGBA,
+                            QOpenGLTexture.UInt8, level.rgba)
+        texture.setWrapMode(QOpenGLTexture.Repeat)
+        if not texture.isCreated():
+            raise RuntimeError("无法创建 texture sampling GPU resource")
+        self.texture = texture
+        self.texture_pending = False
+        self.texture_uploads += 1
 
     def initializeGL(self):
         try:
             context = self.context()
+            extensions = {bytes(value).decode("ascii", "ignore")
+                          for value in context.extensions()}
+            s3tc = ("GL_EXT_texture_compression_s3tc" in extensions or
+                    "GL_EXT_texture_compression_dxt1" in extensions)
+            self.compressed_texture_support = (
+                "BC1/BC3 驱动能力可用；本阶段仅报告能力，未启用 DDS 直传"
+                if s3tc else
+                "未发现 S3TC/BC1/BC3 扩展；图片安全回退为 RGBA8")
             profile = QOpenGLVersionProfile(context.format())
             self.functions = context.versionFunctions(profile)
             if self.functions is None:
@@ -194,16 +249,8 @@ class TextureSamplingViewport(QOpenGLWidget):
                 program.setAttributeBuffer(location, GL_FLOAT, offset, count, 24)
             program.release(); buffer.release(); vertex_array.release()
             self.geometry_uploads += 1
-            image = QImage(self.base_rgba, self.texture_size, self.texture_size,
-                           self.texture_size * 4, QImage.Format_RGBA8888).copy()
-            texture = QOpenGLTexture(image)
-            if not texture.isCreated():
-                raise RuntimeError("无法创建 RGBA8 texture")
-            texture.generateMipMaps()
-            texture.setWrapMode(QOpenGLTexture.Repeat)
-            self.texture_uploads += 1
             self.program, self.buffer, self.vertex_array = program, buffer, vertex_array
-            self.texture = texture
+            self._upload_texture()
             self.last_error = ""
         except Exception as error:
             self.last_error = str(error)
@@ -222,8 +269,11 @@ class TextureSamplingViewport(QOpenGLWidget):
         started = time.perf_counter()
         try:
             if (self.functions is None or self.program is None or
-                    self.buffer is None or self.vertex_array is None or
-                    self.texture is None):
+                    self.buffer is None or self.vertex_array is None):
+                return
+            if self.texture_pending:
+                self._upload_texture()
+            if self.texture is None:
                 return
             self.functions.glViewport(0, 0, max(1, self.width()), max(1, self.height()))
             self.functions.glClearColor(0.055, 0.075, 0.105, 1.0)
@@ -245,12 +295,14 @@ class TextureSamplingViewport(QOpenGLWidget):
             self.vertex_array.bind(); self.buffer.bind(); self.program.bind()
             self.program.setUniformValue("u_texture", 0)
             self.program.setUniformValue("u_texture_size", QVector2D(
-                float(self.texture_size), float(self.texture_size)))
+                float(self.texture_width), float(self.texture_height)))
             self.program.setUniformValue("u_max_lod", float(self.max_lod))
             self.program.setUniformValue("u_tiling", float(self.tiling))
             self.program.setUniformValue("u_phase", float(self.phase))
             self.program.setUniformValue("u_anisotropic", int(self.anisotropic))
             self.program.setUniformValue("u_max_taps", int(self.max_taps))
+            self.program.setUniformValue("u_encode_srgb",
+                                         1 if self.color_space == "srgb" else 0)
             self.program.setUniformValue(
                 "u_view", {"final": 0, "mip_color": 1, "lod_heatmap": 2,
                            "footprint": 3, "anisotropy": 4,
@@ -274,6 +326,11 @@ class TextureSamplingViewport(QOpenGLWidget):
             "frame_count": self.frame_count,
             "draw_ms": self.draw_ms,
             "max_lod": self.max_lod,
+            "texture_size": (self.texture_width, self.texture_height),
+            "color_space": self.color_space,
+            "internal_format": ("GL_SRGB8_ALPHA8" if self.color_space == "srgb"
+                                else "GL_RGBA8"),
+            "compressed_texture_support": self.compressed_texture_support,
             "error": self.last_error,
         }
 
@@ -282,14 +339,25 @@ class TextureSamplingPanel(QWidget):
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
         self.canvas = canvas
+        self.texture_width = self.texture_height = 256
         self.texture_size = 256
-        self.base_rgba = build_checker_texture(self.texture_size)
+        self.source_name = "程序化 Checker/Grid"
+        self.color_mode = "linear"
+        self.base_rgba = build_checker_texture(self.texture_width)
         self.mip_levels, self.backend = generate_mipmaps(
-            self.base_rgba, self.texture_size, self.texture_size)
+            self.base_rgba, self.texture_width, self.texture_height)
         self.python_mip_levels = python_generate(
-            self.base_rgba, self.texture_size, self.texture_size)
+            self.base_rgba, self.texture_width, self.texture_height)
+        self.srgb_mip_levels, self.srgb_backend = generate_mipmaps_srgb(
+            self.base_rgba, self.texture_width, self.texture_height)
+        self.python_srgb_mip_levels = python_generate_srgb(
+            self.base_rgba, self.texture_width, self.texture_height)
+        self.linear_mip_levels = self.mip_levels
+        self.python_linear_mip_levels = self.python_mip_levels
+        self.linear_backend = self.backend
         self.viewport = TextureSamplingViewport(
-            self.base_rgba, self.texture_size, self)
+            self.base_rgba, self.texture_width, self.texture_height,
+            self.mip_levels, self)
         self.phase = 0.0
         self._build_ui()
         self.timer = QTimer(self); self.timer.setInterval(33)
@@ -309,6 +377,28 @@ class TextureSamplingPanel(QWidget):
         splitter.addWidget(self.viewport)
         controls = QWidget(); controls.setMinimumWidth(360)
         controls_layout = QVBoxLayout(controls)
+
+        source_group = QGroupBox("纹理来源与色彩空间")
+        source_layout = QVBoxLayout(source_group)
+        source_buttons = QHBoxLayout()
+        load_image = QPushButton("加载 PNG/JPEG")
+        restore_checker = QPushButton("恢复程序纹理")
+        load_image.clicked.connect(self._load_image)
+        restore_checker.clicked.connect(self._restore_checker)
+        source_buttons.addWidget(load_image); source_buttons.addWidget(restore_checker)
+        source_layout.addLayout(source_buttons)
+        source_form = QFormLayout()
+        self.color_space_combo = QComboBox()
+        self.color_space_combo.addItem("Legacy / bytes 当作 Linear", "linear")
+        self.color_space_combo.addItem("sRGB texture + Linear-light Mips", "srgb")
+        self.color_space_combo.addItem("sRGB texture + 错误 Gamma Mips", "srgb_wrong_mip")
+        self.color_space_combo.currentIndexChanged.connect(self._color_space_changed)
+        source_form.addRow("GPU/Filter 路径", self.color_space_combo)
+        source_layout.addLayout(source_form)
+        self.source_label = QLabel(); self.source_label.setWordWrap(True)
+        self.source_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        source_layout.addWidget(self.source_label)
+        controls_layout.addWidget(source_group)
 
         render_group = QGroupBox("GPU 采样控制")
         render_form = QFormLayout(render_group)
@@ -377,16 +467,8 @@ class TextureSamplingPanel(QWidget):
         mip_group = QGroupBox("C++ 生成的完整 Mip 链")
         mip_layout = QVBoxLayout(mip_group)
         mip_scroll = QScrollArea(); mip_scroll.setWidgetResizable(True)
-        mip_content = QWidget(); mip_row = QHBoxLayout(mip_content)
-        for index, level in enumerate(self.mip_levels):
-            column = QVBoxLayout(); label = QLabel(f"L{index}\n{level.width}×{level.height}")
-            label.setAlignment(Qt.AlignCenter)
-            preview = QLabel(); preview.setAlignment(Qt.AlignCenter)
-            image = QImage(level.rgba, level.width, level.height, level.width * 4,
-                           QImage.Format_RGBA8888).copy()
-            preview.setPixmap(image_to_pixmap(image, min(112, max(24, level.width))))
-            column.addWidget(preview); column.addWidget(label); mip_row.addLayout(column)
-        mip_row.addStretch(1); mip_scroll.setWidget(mip_content)
+        self.mip_scroll = mip_scroll
+        self._rebuild_mip_preview()
         mip_layout.addWidget(mip_scroll); controls_layout.addWidget(mip_group)
 
         self.state_label = QLabel(); self.state_label.setWordWrap(True)
@@ -408,6 +490,85 @@ class TextureSamplingPanel(QWidget):
         for control in (self.probe_u, self.probe_v, self.probe_lod,
                         *self.derivative_spins):
             control.valueChanged.connect(self._update_probe)
+
+    def _rebuild_mip_preview(self):
+        content = QWidget(); row = QHBoxLayout(content)
+        for index, level in enumerate(self.mip_levels):
+            column = QVBoxLayout()
+            label = QLabel(f"L{index}\n{level.width}×{level.height}")
+            label.setAlignment(Qt.AlignCenter)
+            preview = QLabel(); preview.setAlignment(Qt.AlignCenter)
+            image = QImage(level.rgba, level.width, level.height,
+                           level.width * 4, QImage.Format_RGBA8888).copy()
+            preview.setPixmap(image_to_pixmap(
+                image, min(112, max(24, max(level.width, level.height)))))
+            column.addWidget(preview); column.addWidget(label); row.addLayout(column)
+        row.addStretch(1)
+        self.mip_scroll.setWidget(content)
+
+    def _apply_source(self, rgba, width, height, source_name):
+        width, height = int(width), int(height)
+        if width <= 0 or height <= 0 or width > 2048 or height > 2048:
+            raise ValueError("图片尺寸必须位于 1..2048")
+        if len(rgba) != width * height * 4:
+            raise ValueError("RGBA8 图片缓冲尺寸不匹配")
+        linear_levels, linear_backend = generate_mipmaps(rgba, width, height)
+        srgb_levels, srgb_backend = generate_mipmaps_srgb(rgba, width, height)
+        python_linear = python_generate(rgba, width, height)
+        python_srgb = python_generate_srgb(rgba, width, height)
+        self.base_rgba = bytes(rgba)
+        self.texture_width, self.texture_height = width, height
+        self.texture_size = max(width, height)
+        self.source_name = str(source_name)
+        self.linear_mip_levels, self.linear_backend = linear_levels, linear_backend
+        self.python_linear_mip_levels = python_linear
+        self.srgb_mip_levels, self.srgb_backend = srgb_levels, srgb_backend
+        self.python_srgb_mip_levels = python_srgb
+        self._color_space_changed()
+
+    def _load_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "加载纹理图片", "", "Images (*.png *.jpg *.jpeg)")
+        if not path:
+            return
+        try:
+            if os.path.getsize(path) > 64 * 1024 * 1024:
+                raise ValueError("图片文件超过 64 MiB 安全上限")
+            image = QImage(path)
+            if image.isNull():
+                raise ValueError("Qt 无法解码该图片")
+            if image.width() > 2048 or image.height() > 2048:
+                raise ValueError("图片像素尺寸超过 2048×2048 安全上限")
+            converted = image.convertToFormat(QImage.Format_RGBA8888)
+            pointer = converted.bits(); pointer.setsize(converted.byteCount())
+            self._apply_source(bytes(pointer), converted.width(), converted.height(),
+                               os.path.basename(path))
+        except (OSError, ValueError) as error:
+            self.viewport.last_error = f"图片加载失败：{error}"
+            self.refresh()
+
+    def _restore_checker(self):
+        self._apply_source(build_checker_texture(256), 256, 256,
+                           "程序化 Checker/Grid")
+
+    def _color_space_changed(self, *args):
+        if not hasattr(self, "color_space_combo"):
+            return
+        self.color_mode = self.color_space_combo.currentData()
+        correct = self.color_mode == "srgb"
+        self.mip_levels = self.srgb_mip_levels if correct else self.linear_mip_levels
+        self.python_mip_levels = (self.python_srgb_mip_levels if correct
+                                  else self.python_linear_mip_levels)
+        self.backend = self.srgb_backend if correct else self.linear_backend
+        gpu_space = "srgb" if self.color_mode != "linear" else "linear"
+        self.viewport.set_source(self.base_rgba, self.texture_width,
+                                 self.texture_height, self.mip_levels, gpu_space)
+        if hasattr(self, "lod_slider"):
+            maximum = len(self.mip_levels) - 1
+            self.lod_slider.setMaximum(maximum)
+            self.probe_lod.setMaximum(maximum)
+            self._rebuild_mip_preview()
+            self._update_probe(); self.refresh()
 
     def _controls_changed(self, *args):
         self.lod_slider.setEnabled(self.manual_lod_check.isChecked())
@@ -432,20 +593,34 @@ class TextureSamplingPanel(QWidget):
 
     def _update_probe(self, *args):
         filter_mode = self.filter_combo.currentData()
-        native, backend = sample_texture(
-            self.base_rgba, self.texture_size, self.texture_size,
-            self.probe_u.value(), self.probe_v.value(), self.probe_lod.value(),
-            filter_mode, self.repeat_check.isChecked())
+        if self.color_mode == "srgb":
+            native = python_sample(
+                self.mip_levels, self.probe_u.value(), self.probe_v.value(),
+                self.probe_lod.value(), filter_mode,
+                self.repeat_check.isChecked())
+            backend = f"{self.backend} Mips + reference sampler"
+        else:
+            native, backend = sample_texture(
+                self.base_rgba, self.texture_width, self.texture_height,
+                self.probe_u.value(), self.probe_v.value(), self.probe_lod.value(),
+                filter_mode, self.repeat_check.isChecked())
         reference = python_sample(
             self.python_mip_levels,
             self.probe_u.value(), self.probe_v.value(), self.probe_lod.value(),
             filter_mode, self.repeat_check.isChecked())
         difference = tuple(abs(native[index] - reference[index]) for index in range(4))
         derivatives = tuple(control.value() for control in self.derivative_spins)
-        aniso_native, footprint, aniso_backend = sample_anisotropic(
-            self.base_rgba, self.texture_size, self.texture_size,
-            self.probe_u.value(), self.probe_v.value(), *derivatives,
-            self.tap_combo.currentData(), self.repeat_check.isChecked())
+        if self.color_mode == "srgb":
+            aniso_native, footprint = python_anisotropic(
+                self.mip_levels, self.probe_u.value(), self.probe_v.value(),
+                *derivatives, self.tap_combo.currentData(),
+                self.repeat_check.isChecked())
+            aniso_backend = f"{self.backend} Mips + reference sampler"
+        else:
+            aniso_native, footprint, aniso_backend = sample_anisotropic(
+                self.base_rgba, self.texture_width, self.texture_height,
+                self.probe_u.value(), self.probe_v.value(), *derivatives,
+                self.tap_combo.currentData(), self.repeat_check.isChecked())
         aniso_reference, reference_footprint = python_anisotropic(
             self.python_mip_levels, self.probe_u.value(), self.probe_v.value(),
             *derivatives, self.tap_combo.currentData(), self.repeat_check.isChecked())
@@ -466,10 +641,19 @@ class TextureSamplingPanel(QWidget):
     def refresh(self, *args):
         state = self.viewport.runtime_state()
         mip_bytes = sum(len(level.rgba) for level in self.mip_levels)
+        gamma_difference = sum(abs(first - second)
+            for linear, srgb in zip(self.linear_mip_levels[1:], self.srgb_mip_levels[1:])
+            for first, second in zip(linear.rgba, srgb.rgba))
         error = state["error"] or runtime_error()
+        self.source_label.setText(
+            f"{self.source_name} · {self.texture_width}×{self.texture_height} RGBA8\n"
+            f"模式 {self.color_space_combo.currentText()} · GPU {state['internal_format']} · "
+            f"Mip RGB absolute byte difference {gamma_difference}")
         self.state_label.setText(
             f"Mip backend {self.backend} · levels {len(self.mip_levels)} · "
-            f"L0 {self.texture_size}² → L{len(self.mip_levels)-1} 1²\n"
+            f"L0 {self.texture_width}×{self.texture_height} → "
+            f"L{len(self.mip_levels)-1} {self.mip_levels[-1].width}×"
+            f"{self.mip_levels[-1].height}\n"
             f"CPU chain {mip_bytes / 1024:.1f} KiB · GPU texture ≈"
             f"{mip_bytes / 1024:.1f} KiB · Filter {self.filter_combo.currentText()}\n"
             f"Anisotropic {'ON' if self.anisotropic_check.isChecked() else 'OFF'} · "
@@ -477,7 +661,8 @@ class TextureSamplingPanel(QWidget):
             f"Debug {self.view_combo.currentText()}\n"
             f"GL context/texture {state['context_valid']}/{state['texture_valid']} · "
             f"uploads texture/VBO {state['texture_uploads']}/{state['geometry_uploads']} · "
-            f"frames {state['frame_count']} · draw {state['draw_ms']:.3f} ms"
+            f"frames {state['frame_count']} · draw {state['draw_ms']:.3f} ms\n"
+            f"压缩纹理：{state['compressed_texture_support']}"
             + (f"\n错误：{error}" if error else ""))
 
     def showEvent(self, event):

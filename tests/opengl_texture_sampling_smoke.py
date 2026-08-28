@@ -44,13 +44,19 @@ def main():
              ("trilinear", "anisotropy", False, 0, True),
              ("trilinear", "tap_count", False, 0, True),
              ("trilinear", "final", True, 7, False))
+    color_modes = ("linear", "srgb_wrong_mip", "srgb")
 
     def run_case(index=0):
         if index >= len(cases):
-            before_phase = panel.phase
-            before_uploads = panel.viewport.texture_uploads
-            panel.animate_check.setChecked(True)
-            QTimer.singleShot(260, lambda: finish(before_phase, before_uploads))
+            gradient = bytearray(96 * 64 * 4)
+            for y in range(64):
+                for x in range(96):
+                    offset = (y * 96 + x) * 4
+                    gradient[offset:offset + 4] = bytes((
+                        int(x * 255 / 95), int(y * 255 / 63),
+                        255 if (x // 8 + y // 8) & 1 else 24, 255))
+            panel._apply_source(bytes(gradient), 96, 64, "smoke-gradient")
+            QTimer.singleShot(200, lambda: run_color_case(0))
             return
         filter_mode, view_mode, manual, level, anisotropic = cases[index]
         panel.filter_combo.setCurrentIndex(panel.filter_combo.findData(filter_mode))
@@ -61,6 +67,26 @@ def main():
         panel.viewport.update()
         QTimer.singleShot(180, lambda: capture(index, filter_mode, view_mode,
                                                manual, level, anisotropic))
+
+    def run_color_case(index):
+        if index >= len(color_modes):
+            before_phase = panel.phase
+            before_uploads = panel.viewport.texture_uploads
+            panel.animate_check.setChecked(True)
+            QTimer.singleShot(260, lambda: finish(before_phase, before_uploads))
+            return
+        mode = color_modes[index]
+        panel.color_space_combo.setCurrentIndex(
+            panel.color_space_combo.findData(mode))
+        panel.filter_combo.setCurrentIndex(panel.filter_combo.findData("trilinear"))
+        panel.view_combo.setCurrentIndex(panel.view_combo.findData("final"))
+        panel.manual_lod_check.setChecked(False)
+        panel.viewport.update()
+        QTimer.singleShot(220, lambda: capture_color(index, mode))
+
+    def capture_color(index, mode):
+        report[f"color:{mode}"] = signature(panel.viewport.grabFramebuffer())
+        run_color_case(index + 1)
 
     def capture(index, filter_mode, view_mode, manual, level, anisotropic):
         key = (f"{filter_mode}:{view_mode}:manual={manual}:L{level}:"
@@ -78,9 +104,12 @@ def main():
         hashes = {key: value["sha1"] for key, value in report.items()
                   if isinstance(value, dict) and "sha1" in value}
         required = (state["context_valid"] and state["texture_valid"] and
-                    not state["error"] and state["texture_uploads"] == 1 and
+                    not state["error"] and state["texture_uploads"] >= 3 and
                     state["geometry_uploads"] == 1 and
                     len(set(hashes.values())) >= 8 and
+                    state["texture_size"] == (96, 64) and
+                    state["internal_format"] == "GL_SRGB8_ALPHA8" and
+                    len({hashes.get(f"color:{mode}") for mode in color_modes}) == 3 and
                     panel.phase != before_phase and
                     panel.viewport.texture_uploads == before_uploads and
                     window.canvas.render_revision == revision and

@@ -2,7 +2,7 @@
 
 > 文档用途：后续阶段开发的设计依据、执行计划和结果记录  
 > 建立日期：2026-07-27  
-> 当前状态：M21.0–M21.3 已完成；正在实施 M21.4 色彩空间与图片纹理
+> 当前状态：M21.0–M21.4 已完成；正在实施 M21.5 C++ 距离场与 OpenGL SDF
 
 ## 1. 使用规则
 
@@ -1722,3 +1722,12 @@ C++ 读取固定的 24-byte 顶点格式和 draw command；Python 仍管理 Qt �
 - UI 增加自动/固定曝光、compensation、middle grey、明/暗适应速度和 16 列压缩直方图；状态明确报告 current/target、更新次数、readback ms 和真实 backend。
 - 真实 OpenGL：-1 EV compensation 下目标曝光约 `0.3987`，当前值由 1.0 连续收敛到约 `0.554`；900 ms 内完成 7 次统计，最近一次 32² float readback 约 1.33 ms，最终 signature 随曝光变化，mesh upload 保持 1。
 - 完整自动化 146/146；真实 smoke 报告 `GPU 32x32 reduction + C++ native`，无 GL/Qt 事件循环错误。
+
+#### M21.4 实施回填
+
+- 纹理实验页支持本地 PNG/JPEG 导入，读取前限制文件为 64 MiB、解码尺寸为 2048×2048；统一转换为 RGBA8，只显示文件名且不写入文档、History 或持久设置。非方形纹理尺寸贯穿 mip、采样与 GPU 上传。
+- Python/C++ 增加线性光空间 sRGB box mip 生成：RGB 先按 IEC sRGB 解码、平均后重新编码，alpha 保持线性平均；黑白 `2×2 → 1×1` golden case 中错误 gamma 结果为 128，正确结果为 188，原生与 Python 字节级一致。
+- GPU 提供 Linear、sRGB 正确 mip、sRGB 错误 gamma mip 三种可切换路径；sRGB 路径使用 `GL_SRGB8_ALPHA8` 自动解码，Shader 在最终输出重新编码，且继续复用 M19 的过滤、LOD、footprint 与各向异性调试视图。
+- OpenGL context 探测 S3TC/BC1/BC3 扩展并明确报告能力。本阶段不实现通用 DDS 容器和直接压缩上传：有扩展时标注“能力可用但未启用 DDS 直传”，无扩展时明确回退 RGBA8，避免将驱动能力误报为功能实现。
+- 真实 OpenGL 使用程序生成的 `96×64` 渐变源验证三种色彩解释，得到三个不同 framebuffer signature；最终内部格式为 `GL_SRGB8_ALPHA8`，切换发生 4 次受控上传，动画阶段 upload 计数保持 4，无资源抖动或错误。
+- 语法、纹理数学、原生 parity 与 UI 工作区定向测试 17/17 通过；M21.4 完成后进入距离场阶段。

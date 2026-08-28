@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 import math
 
+from .hdr_postprocess import linear_to_srgb, srgb_to_linear
+
 
 FILTERS = ("nearest", "bilinear", "trilinear")
 
@@ -68,6 +70,41 @@ def generate_mipmaps(rgba, width, height):
                             count += 1
                     output[(y * next_width + x) * 4 + channel] = (
                         total + count // 2) // count
+        width, height = next_width, next_height
+        levels.append(MipLevel(width, height, bytes(output)))
+    return tuple(levels)
+
+
+def generate_mipmaps_srgb(rgba, width, height):
+    """Generate mip levels by averaging RGB in linear light, not sRGB bytes."""
+    width, height, rgba = int(width), int(height), bytes(rgba)
+    if width <= 0 or height <= 0 or width > 2048 or height > 2048:
+        raise ValueError("texture dimensions must be between 1 and 2048")
+    if len(rgba) != width * height * 4:
+        raise ValueError("RGBA8 buffer size does not match dimensions")
+    levels = [MipLevel(width, height, rgba)]
+    while width > 1 or height > 1:
+        source = levels[-1]
+        next_width, next_height = max(1, (width + 1) // 2), max(1, (height + 1) // 2)
+        output = bytearray(next_width * next_height * 4)
+        for y in range(next_height):
+            for x in range(next_width):
+                samples = []
+                for offset_y in range(2):
+                    source_y = min(height - 1, y * 2 + offset_y)
+                    for offset_x in range(2):
+                        source_x = min(width - 1, x * 2 + offset_x)
+                        offset = (source_y * width + source_x) * 4
+                        samples.append(source.rgba[offset:offset + 4])
+                destination = (y * next_width + x) * 4
+                for channel in range(3):
+                    linear = sum(srgb_to_linear(sample[channel] / 255.0)
+                                 for sample in samples) / len(samples)
+                    output[destination + channel] = max(0, min(255,
+                        int(math.floor(linear_to_srgb(linear) * 255.0 + 0.5))))
+                output[destination + 3] = (
+                    sum(sample[3] for sample in samples) + len(samples) // 2
+                ) // len(samples)
         width, height = next_width, next_height
         levels.append(MipLevel(width, height, bytes(output)))
     return tuple(levels)

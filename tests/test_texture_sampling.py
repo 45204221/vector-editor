@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import QApplication, QSplitter
 from core import native_texture
 from core.texture_sampling import (MipLevel, build_checker_texture,
                                    generate_mipmaps, sample_anisotropic,
+                                   generate_mipmaps_srgb,
                                    sample_mipmaps, texture_footprint)
 from ui.main_window import MainWindow
 
@@ -39,6 +40,14 @@ class TextureSamplingTests(unittest.TestCase):
                         40, 50, 60, 255, 60, 70, 80, 255))
         levels = generate_mipmaps(source, 2, 2)
         self.assertEqual(levels[1].rgba, bytes((30, 40, 50, 255)))
+
+    def test_srgb_mips_average_in_linear_light(self):
+        source = bytes((0, 0, 0, 255, 255, 255, 255, 255,
+                        0, 0, 0, 255, 255, 255, 255, 255))
+        encoded = generate_mipmaps(source, 2, 2)[1].rgba
+        correct = generate_mipmaps_srgb(source, 2, 2)[1].rgba
+        self.assertEqual(encoded, bytes((128, 128, 128, 255)))
+        self.assertEqual(correct, bytes((188, 188, 188, 255)))
 
     def test_odd_edge_is_preserved_by_clamped_box(self):
         source = bytes((10, 0, 0, 255, 30, 0, 0, 255, 90, 0, 0, 255))
@@ -123,6 +132,11 @@ class TextureSamplingTests(unittest.TestCase):
         for field in expected_footprint.__dataclass_fields__:
             self.assertAlmostEqual(getattr(footprint, field),
                                    getattr(expected_footprint, field))
+        srgb_reference = generate_mipmaps_srgb(source, 32, 32)
+        srgb_actual, backend = native_texture.generate_mipmaps_srgb(
+            source, 32, 32)
+        self.assertEqual(backend, "C++ native")
+        self.assertEqual(srgb_actual, srgb_reference)
 
 
 class TextureSamplingPanelTests(unittest.TestCase):
@@ -146,6 +160,13 @@ class TextureSamplingPanelTests(unittest.TestCase):
         self.assertIn("ratio", panel.footprint_label.text())
         self.assertTrue(panel.viewport.anisotropic)
         self.assertEqual(panel.viewport.max_taps, 4)
+        panel.color_space_combo.setCurrentIndex(
+            panel.color_space_combo.findData("srgb"))
+        APP.processEvents()
+        self.assertEqual(panel.color_mode, "srgb")
+        self.assertEqual(panel.viewport.color_space, "srgb")
+        self.assertNotEqual(panel.linear_mip_levels[-2].rgba,
+                            panel.srgb_mip_levels[-2].rgba)
         self.assertEqual(window.canvas.render_revision, revision)
         self.assertEqual(window.canvas.history_manager.current_index, history)
         panel.animate_check.setChecked(True); APP.processEvents()

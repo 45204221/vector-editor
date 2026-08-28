@@ -390,6 +390,20 @@ PyObject* py_generate_mipmaps(PyObject*, PyObject* args) {
     }
 }
 
+PyObject* py_generate_mipmaps_srgb(PyObject*, PyObject* args) {
+    PyObject* rgba_object = nullptr;
+    int width = 0, height = 0;
+    if (!PyArg_ParseTuple(args, "Oii", &rgba_object, &width, &height)) return nullptr;
+    std::vector<std::uint8_t> rgba;
+    if (!parse_rgba_buffer(rgba_object, rgba)) return nullptr;
+    try {
+        return mip_levels_to_tuple(
+            vector_engine::generate_mipmaps(rgba, width, height, true));
+    } catch (const std::exception& error) {
+        PyErr_SetString(PyExc_ValueError, error.what()); return nullptr;
+    }
+}
+
 PyObject* py_sample_texture(PyObject*, PyObject* args, PyObject* kwargs) {
     PyObject* rgba_object = nullptr;
     int width = 0, height = 0, repeat = 1;
@@ -521,6 +535,8 @@ PyMethodDef methods[] = {
      "Rasterize clip-space triangles into CPU color/depth/barycentric buffers."},
     {"generate_mipmaps", py_generate_mipmaps, METH_VARARGS,
      "Generate a complete RGBA8 mip chain with a 2x2 box filter."},
+    {"generate_mipmaps_srgb", py_generate_mipmaps_srgb, METH_VARARGS,
+     "Generate RGBA8 mips while averaging sRGB channels in linear light."},
     {"sample_texture", reinterpret_cast<PyCFunction>(py_sample_texture),
      METH_VARARGS | METH_KEYWORDS,
      "Sample an RGBA8 mip chain with nearest, bilinear or trilinear filtering."},
