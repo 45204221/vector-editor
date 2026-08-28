@@ -1,9 +1,11 @@
 """Runtime configuration and CPU stage tracing for the M17 3D pipeline."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import math
 
 from PyQt5.QtGui import QMatrix4x4, QVector3D, QVector4D
+
+from .hdr_postprocess import ToneMappingConfig
 
 
 VIEW_MODES = (("最终光照", "final"), ("线框", "wireframe"),
@@ -14,7 +16,9 @@ ATTACHMENT_MODES = (("Normal RGB", "normal"),
                     ("Shadow Map", "shadow"),
                     ("G-Position", "g_position"),
                     ("G-Normal", "g_normal"),
-                    ("G-Albedo", "g_albedo"))
+                    ("G-Albedo", "g_albedo"),
+                    ("HDR Scene (RGBA16F)", "hdr_scene"),
+                    ("Tone Mapped Output", "hdr_final"))
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,7 @@ class Pipeline3DConfig:
     pcf_radius: int = 1
     render_path: str = "forward"
     light_count: int = 4
+    hdr: ToneMappingConfig = field(default_factory=ToneMappingConfig)
 
     def __post_init__(self):
         if self.source_mode not in ("cube", "selection"):
@@ -76,6 +81,8 @@ class Pipeline3DConfig:
             raise ValueError("render path must be forward or deferred")
         if self.light_count not in (1, 4, 8):
             raise ValueError("light count must be 1, 4 or 8")
+        if not isinstance(self.hdr, ToneMappingConfig):
+            raise TypeError("hdr must be a ToneMappingConfig")
 
     def changed(self, **changes):
         return replace(self, **changes)

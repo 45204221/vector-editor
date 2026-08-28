@@ -11,7 +11,9 @@ if SRC not in sys.path:
 
 from PyQt5.QtWidgets import QApplication
 from core import native_hdr
-from core.hdr_postprocess import CanvasHdrConfig, tone_map_rgb
+from core.hdr_postprocess import (CanvasHdrConfig, ToneMappingConfig,
+                                  linear_to_srgb, relative_luminance,
+                                  srgb_to_linear, tone_map_rgb)
 from ui.main_window import MainWindow
 
 
@@ -19,6 +21,9 @@ APP = QApplication.instance() or QApplication([])
 
 
 class HdrToneMappingTests(unittest.TestCase):
+    def test_canvas_config_is_shared_tone_mapping_contract(self):
+        self.assertIs(CanvasHdrConfig, ToneMappingConfig)
+
     def test_config_validation_and_changes(self):
         config = CanvasHdrConfig()
         self.assertEqual(config.as_dict(), {
@@ -52,6 +57,19 @@ class HdrToneMappingTests(unittest.TestCase):
                           ((math.inf, 0, 0), 1.0, "linear")):
             with self.assertRaises(ValueError):
                 tone_map_rgb(*arguments)
+
+    def test_srgb_round_trip_and_luminance(self):
+        for encoded in (0.0, 0.02, 0.18, 0.5, 1.0):
+            self.assertAlmostEqual(
+                linear_to_srgb(srgb_to_linear(encoded)), encoded, places=12)
+        self.assertAlmostEqual(relative_luminance((1.0, 1.0, 1.0)), 1.0)
+        self.assertAlmostEqual(relative_luminance((1.0, 0.0, 0.0)), 0.2126)
+        with self.assertRaises(ValueError):
+            srgb_to_linear(1.1)
+        with self.assertRaises(ValueError):
+            linear_to_srgb(-0.1)
+        with self.assertRaises(ValueError):
+            relative_luminance((1.0, 0.0))
 
     @unittest.skipUnless(native_hdr.is_available(), "native HDR ABI not built")
     def test_cpp_python_parity(self):

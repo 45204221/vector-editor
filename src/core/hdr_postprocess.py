@@ -21,7 +21,9 @@ _DEBUG_VALUES = frozenset(value for _, value in HDR_DEBUG_VIEWS)
 
 
 @dataclass(frozen=True)
-class CanvasHdrConfig:
+class ToneMappingConfig:
+    """Backend-neutral runtime configuration for an HDR display transform."""
+
     enabled: bool = False
     tone_mapper: str = "reinhard"
     exposure: float = 1.0
@@ -52,6 +54,41 @@ class CanvasHdrConfig:
             "exposure": self.exposure,
             "debug_view": self.debug_view,
         }
+
+
+# M20 exposed this name to the canvas/UI.  Keep it as an alias so the shared
+# M21 contract does not break the existing public surface or saved test code.
+CanvasHdrConfig = ToneMappingConfig
+
+
+def srgb_to_linear(value):
+    """Decode one IEC 61966-2-1 sRGB channel into linear light."""
+    value = float(value)
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise ValueError("sRGB channel must be finite and between 0 and 1")
+    if value <= 0.04045:
+        return value / 12.92
+    return ((value + 0.055) / 1.055) ** 2.4
+
+
+def linear_to_srgb(value):
+    """Encode one non-negative linear-light channel as IEC sRGB."""
+    value = float(value)
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError("linear channel must be finite and non-negative")
+    if value <= 0.0031308:
+        return 12.92 * value
+    return 1.055 * (value ** (1.0 / 2.4)) - 0.055
+
+
+def relative_luminance(rgb):
+    """Return Rec.709 relative luminance for a linear RGB triplet."""
+    values = tuple(float(value) for value in rgb)
+    if len(values) != 3 or not all(math.isfinite(value) for value in values):
+        raise ValueError("rgb must contain three finite values")
+    if any(value < 0.0 for value in values):
+        raise ValueError("linear RGB channels cannot be negative")
+    return 0.2126 * values[0] + 0.7152 * values[1] + 0.0722 * values[2]
 
 
 def tone_map_rgb(rgb, exposure=1.0, tone_mapper="reinhard", gamma=2.2):

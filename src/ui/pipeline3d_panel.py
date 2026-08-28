@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
                              QVBoxLayout, QWidget)
 
 from core.mesh3d import MESH_VERTEX_STRIDE
+from core.hdr_postprocess import HDR_DEBUG_VIEWS, TONE_MAPPERS
 from core.mesh_source import selected_mesh_source
 from core.native_mesh import cube_mesh, extrude_mesh
 from core.native_rasterizer import software_rasterize
@@ -255,6 +256,45 @@ void main() {
 }
 """
 
+HDR_POST_FRAGMENT_SHADER = """
+#ifdef GL_ES
+precision highp float;
+#endif
+uniform sampler2D u_hdr_scene;
+uniform int u_tone_mapper;
+uniform float u_exposure;
+uniform int u_debug_view;
+varying vec2 v_uv;
+
+vec3 tone_map(vec3 value) {
+    if (u_tone_mapper == 0) return clamp(value, 0.0, 1.0);
+    if (u_tone_mapper == 1) return value / (vec3(1.0) + value);
+    return clamp((value * (2.51 * value + 0.03)) /
+                 (value * (2.43 * value + 0.59) + 0.14), 0.0, 1.0);
+}
+vec3 heatmap(float value) {
+    float level = clamp((log2(max(value, 0.0001)) + 8.0) / 12.0, 0.0, 1.0);
+    return clamp(vec3(1.5 - abs(4.0 * level - 3.0),
+                      1.5 - abs(4.0 * level - 2.0),
+                      1.5 - abs(4.0 * level - 1.0)), 0.0, 1.0);
+}
+void main() {
+    vec4 source = texture2D(u_hdr_scene, v_uv);
+    vec3 exposed = max(source.rgb, vec3(0.0)) * u_exposure;
+    if (u_debug_view == 1) {
+        float luminance = dot(exposed, vec3(0.2126, 0.7152, 0.0722));
+        gl_FragColor = vec4(heatmap(luminance), source.a); return;
+    }
+    if (u_debug_view == 2) {
+        bool clipped = any(greaterThan(exposed, vec3(1.0)));
+        gl_FragColor = vec4(clipped ? vec3(1.0, 0.05, 0.03) :
+                           pow(tone_map(exposed), vec3(1.0 / 2.2)), source.a);
+        return;
+    }
+    gl_FragColor = vec4(pow(tone_map(exposed), vec3(1.0 / 2.2)), source.a);
+}
+"""
+
 
 def _receiver_payload():
     """Two upward-facing triangles used only by the 3D lab."""
@@ -322,6 +362,7 @@ class Pipeline3DViewport(QOpenGLWidget):
         self.program = None
         self.gbuffer_program = None
         self.deferred_program = None
+        self.hdr_program = None
         self.buffer = None
         self.vertex_array = None
         self.quad_buffer = None
@@ -339,10 +380,14 @@ class Pipeline3DViewport(QOpenGLWidget):
         self.comparison_target = None
         self.comparison_targets = {}
         self.gbuffer_target = None
+        self.hdr_target = None
+        self.hdr_preview_target = None
         self.shadow_passes = 0
         self.attachment_passes = 0
         self.gbuffer_passes = 0
         self.lighting_passes = 0
+        self.hdr_passes = 0
+        self.hdr_frames = 0
 
     def set_mesh(self, mesh):
         self.mesh = mesh
@@ -391,6 +436,17 @@ class Pipeline3DViewport(QOpenGLWidget):
             deferred_program.bindAttributeLocation("a_uv", 1)
             if not deferred_program.link():
                 raise RuntimeError(deferred_program.log())
+            hdr_program = QOpenGLShaderProgram()
+            if not hdr_program.addShaderFromSourceCode(
+                    QOpenGLShader.Vertex, QUAD_VERTEX_SHADER):
+                raise RuntimeError(hdr_program.log())
+            if not hdr_program.addShaderFromSourceCode(
+                    QOpenGLShader.Fragment, HDR_POST_FRAGMENT_SHADER):
+                raise RuntimeError(hdr_program.log())
+            hdr_program.bindAttributeLocation("a_position", 0)
+            hdr_program.bindAttributeLocation("a_uv", 1)
+            if not hdr_program.link():
+                raise RuntimeError(hdr_program.log())
             buffer = QOpenGLBuffer(QOpenGLBuffer.VertexBuffer)
             vertex_array = QOpenGLVertexArrayObject()
             quad_buffer = QOpenGLBuffer(QOpenGLBuffer.VertexBuffer)
@@ -418,11 +474,13 @@ class Pipeline3DViewport(QOpenGLWidget):
             deferred_program.release(); quad_buffer.release(); quad_vertex_array.release()
             self.program, self.buffer, self.vertex_array = program, buffer, vertex_array
             self.gbuffer_program, self.deferred_program = gbuffer_program, deferred_program
+            self.hdr_program = hdr_program
             self.quad_buffer, self.quad_vertex_array = quad_buffer, quad_vertex_array
             self.shadow_target = self.normal_target = self.depth_target = None
             self.comparison_target = None
             self.comparison_targets = {}
             self.gbuffer_target = None
+            self.hdr_target = self.hdr_preview_target = None
             self.upload_pending = True
             self.last_error = ""
         except Exception as error:
@@ -468,6 +526,34 @@ class Pipeline3DViewport(QOpenGLWidget):
         if not target.isValid() or len(target.textures()) != 3:
             raise RuntimeError("无法创建 3-attachment G-buffer")
         self.gbuffer_target = target
+        return target
+
+    def _hdr_target(self, width, height):
+        target = self.hdr_target
+        if (target is not None and target.size().width() == width
+                and target.size().height() == height):
+            return target
+        format_ = QOpenGLFramebufferObjectFormat()
+        format_.setAttachment(QOpenGLFramebufferObject.CombinedDepthStencil)
+        format_.setInternalTextureFormat(GL_RGBA16F)
+        target = QOpenGLFramebufferObject(width, height, format_)
+        if not target.isValid():
+            raise RuntimeError(f"无法创建 3D HDR framebuffer {width}x{height}")
+        self.hdr_target = target
+        return target
+
+    def _hdr_preview_target(self, width, height):
+        target = self.hdr_preview_target
+        if (target is not None and target.size().width() == width
+                and target.size().height() == height):
+            return target
+        format_ = QOpenGLFramebufferObjectFormat()
+        format_.setAttachment(QOpenGLFramebufferObject.NoAttachment)
+        format_.setInternalTextureFormat(GL_RGBA8)
+        target = QOpenGLFramebufferObject(width, height, format_)
+        if not target.isValid():
+            raise RuntimeError(f"无法创建 3D HDR preview {width}x{height}")
+        self.hdr_preview_target = target
         return target
 
     def _set_common_uniforms(self, model, view, projection, mode):
@@ -629,9 +715,13 @@ class Pipeline3DViewport(QOpenGLWidget):
         target.release(); self.gbuffer_passes += 1
         return target
 
-    def _render_deferred_lighting(self, target, shadow_target):
-        self.functions.glBindFramebuffer(
-            GL_FRAMEBUFFER, self.defaultFramebufferObject())
+    def _render_deferred_lighting(self, target, shadow_target,
+                                  output_target=None):
+        if output_target is not None:
+            output_target.bind()
+        else:
+            self.functions.glBindFramebuffer(
+                GL_FRAMEBUFFER, self.defaultFramebufferObject())
         width, height = max(1, self.width()), max(1, self.height())
         self.functions.glViewport(0, 0, width, height)
         self.functions.glDisable(GL_DEPTH_TEST); self.functions.glDisable(GL_CULL_FACE)
@@ -668,17 +758,62 @@ class Pipeline3DViewport(QOpenGLWidget):
             self.functions.glActiveTexture(GL_TEXTURE0 + unit)
             self.functions.glBindTexture(GL_TEXTURE_2D, 0)
         self.functions.glActiveTexture(GL_TEXTURE0)
+        if output_target is not None:
+            output_target.release()
         self.lighting_passes += 1
+
+    def _render_hdr_post(self, source_target, output_target=None):
+        if output_target is not None:
+            output_target.bind()
+            width, height = output_target.width(), output_target.height()
+        else:
+            self.functions.glBindFramebuffer(
+                GL_FRAMEBUFFER, self.defaultFramebufferObject())
+            width, height = max(1, self.width()), max(1, self.height())
+        self.functions.glViewport(0, 0, width, height)
+        self.functions.glDisable(GL_DEPTH_TEST); self.functions.glDisable(GL_CULL_FACE)
+        self.functions.glClearColor(0.0, 0.0, 0.0, 1.0)
+        self.functions.glClear(GL_COLOR_BUFFER_BIT)
+        self.functions.glActiveTexture(GL_TEXTURE0)
+        self.functions.glBindTexture(GL_TEXTURE_2D, source_target.texture())
+        program = self.hdr_program
+        self.quad_vertex_array.bind(); self.quad_buffer.bind(); program.bind()
+        program.setUniformValue("u_hdr_scene", 0)
+        program.setUniformValue("u_tone_mapper", {
+            "linear": 0, "reinhard": 1, "aces": 2,
+        }[self.config.hdr.tone_mapper])
+        program.setUniformValue("u_exposure", float(self.config.hdr.exposure))
+        program.setUniformValue("u_debug_view", {
+            "final": 0, "heatmap": 1, "overexposure": 2,
+        }[self.config.hdr.debug_view])
+        self.functions.glDrawArrays(GL_TRIANGLES, 0, 6)
+        program.release(); self.quad_buffer.release(); self.quad_vertex_array.release()
+        self.functions.glBindTexture(GL_TEXTURE_2D, 0)
+        if output_target is not None:
+            output_target.release()
+        self.hdr_passes += 1
 
     def render_attachment(self, kind):
         if kind not in ("normal", "depth", "shadow",
-                        "g_position", "g_normal", "g_albedo"):
+                        "g_position", "g_normal", "g_albedo",
+                        "hdr_scene", "hdr_final"):
             raise ValueError("invalid 3D attachment")
         try:
             self.makeCurrent()
             if self.upload_pending and not self._upload():
                 return None
-            if kind.startswith("g_"):
+            if kind in ("hdr_scene", "hdr_final"):
+                target = self.hdr_target
+                if target is None or not target.isValid():
+                    self.doneCurrent(); return None
+                if kind == "hdr_final":
+                    preview = self._hdr_preview_target(
+                        target.size().width(), target.size().height())
+                    self._render_hdr_post(target, preview)
+                    image = preview.toImage()
+                else:
+                    image = target.toImage()
+            elif kind.startswith("g_"):
                 target = self._render_gbuffer()
                 index = {"g_position": 0, "g_normal": 1, "g_albedo": 2}[kind]
                 image = target.toImage(True, index)
@@ -724,13 +859,30 @@ class Pipeline3DViewport(QOpenGLWidget):
                     self.functions.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
                 gbuffer = self._render_gbuffer()
                 stage = "deferred-lighting"
-                self._render_deferred_lighting(gbuffer, shadow_target)
-                self.draw_calls = 5 if shadow_required else 3
+                hdr_target = (self._hdr_target(max(1, self.width()),
+                                               max(1, self.height()))
+                              if self.config.hdr.enabled else None)
+                self._render_deferred_lighting(
+                    gbuffer, shadow_target, hdr_target)
+                if hdr_target is not None:
+                    stage = "hdr-post"
+                    self._render_hdr_post(hdr_target)
+                    self.hdr_frames += 1
+                self.draw_calls = ((6 if shadow_required else 4)
+                                   if hdr_target is not None else
+                                   (5 if shadow_required else 3))
                 self.last_error = ""
                 return
             stage = "default-target"
-            self.functions.glBindFramebuffer(
-                GL_FRAMEBUFFER, self.defaultFramebufferObject())
+            hdr_target = (self._hdr_target(max(1, self.width()),
+                                           max(1, self.height()))
+                          if self.config.hdr.enabled and
+                          self.config.view_mode == "final" else None)
+            if hdr_target is not None:
+                hdr_target.bind()
+            else:
+                self.functions.glBindFramebuffer(
+                    GL_FRAMEBUFFER, self.defaultFramebufferObject())
             self.functions.glViewport(0, 0, max(1, self.width()), max(1, self.height()))
             self.functions.glClearColor(0.055, 0.075, 0.105, 1.0)
             self.functions.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
@@ -765,7 +917,14 @@ class Pipeline3DViewport(QOpenGLWidget):
             self.functions.glBindTexture(GL_TEXTURE_2D, 0)
             if hasattr(self.functions, "glPolygonMode"):
                 self.functions.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-            self.draw_calls = 4 if shadow_required else 2
+            if hdr_target is not None:
+                hdr_target.release()
+                stage = "hdr-post"
+                self._render_hdr_post(hdr_target)
+                self.hdr_frames += 1
+            self.draw_calls = ((5 if shadow_required else 3)
+                               if hdr_target is not None else
+                               (4 if shadow_required else 2))
             self.last_error = ""
         except Exception as error:
             self.last_error = f"{stage}: {error}"
@@ -821,6 +980,18 @@ class Pipeline3DViewport(QOpenGLWidget):
             "gbuffer_size": (max(1, self.width()), max(1, self.height())),
             "gbuffer_bytes": max(1, self.width()) * max(1, self.height()) * 24,
             "deferred_frame_bytes": max(1, self.width()) * max(1, self.height()) * 40,
+            "hdr_enabled": self.config.hdr.enabled,
+            "hdr_tone_mapper": self.config.hdr.tone_mapper,
+            "hdr_exposure": self.config.hdr.exposure,
+            "hdr_debug_view": self.config.hdr.debug_view,
+            "hdr_valid": bool(self.hdr_target is not None and
+                              self.hdr_target.isValid()),
+            "hdr_size": ((self.hdr_target.size().width(),
+                          self.hdr_target.size().height())
+                         if self.hdr_target is not None else (0, 0)),
+            "hdr_bytes": max(1, self.width()) * max(1, self.height()) * 12,
+            "hdr_passes": self.hdr_passes,
+            "hdr_frames": self.hdr_frames,
             "error": self.last_error or self.mesh.error,
         }
 
@@ -951,6 +1122,27 @@ class Pipeline3DPanel(QWidget):
         self.path_note = QLabel(); self.path_note.setWordWrap(True)
         lighting_form.addRow(self.path_note)
         self.lighting_page_layout.addWidget(lighting_group)
+
+        hdr_group = QGroupBox("3D HDR / Tone Mapping")
+        hdr_form = QFormLayout(hdr_group)
+        self.hdr_enabled_check = QCheckBox("启用 RGBA16F HDR 输出")
+        self.hdr_tone_combo = QComboBox()
+        for label, value in TONE_MAPPERS:
+            self.hdr_tone_combo.addItem(label, value)
+        self.hdr_exposure_spin = self._spin(0.05, 8.0, 1.0, 0.25, 2)
+        self.hdr_debug_combo = QComboBox()
+        for label, value in HDR_DEBUG_VIEWS:
+            self.hdr_debug_combo.addItem(label, value)
+        hdr_form.addRow(self.hdr_enabled_check)
+        hdr_form.addRow("Tone mapper", self.hdr_tone_combo)
+        hdr_form.addRow("Exposure", self.hdr_exposure_spin)
+        hdr_form.addRow("Debug view", self.hdr_debug_combo)
+        self.hdr_note = QLabel(
+            "Forward/Deferred 共用线性 HDR → Tone Mapping → gamma 2.2；"
+            "配置只影响实验 viewport。")
+        self.hdr_note.setWordWrap(True)
+        hdr_form.addRow(self.hdr_note)
+        self.lighting_page_layout.addWidget(hdr_group)
         self.lighting_page_layout.addStretch(1)
 
         attachment_group = QGroupBox("真实 OpenGL 附件（手动读取）")
@@ -1076,7 +1268,9 @@ class Pipeline3DPanel(QWidget):
                         self.shininess_spin, self.shadow_check,
                         self.shadow_resolution_combo, self.bias_spin,
                         self.pcf_combo, self.render_path_combo,
-                        self.light_count_combo):
+                        self.light_count_combo, self.hdr_enabled_check,
+                        self.hdr_tone_combo, self.hdr_exposure_spin,
+                        self.hdr_debug_combo):
             signal = (control.toggled if isinstance(control, QCheckBox)
                       else control.currentIndexChanged if isinstance(control, QComboBox)
                       else control.valueChanged)
@@ -1237,7 +1431,12 @@ class Pipeline3DPanel(QWidget):
                 shadow_resolution=self.shadow_resolution_combo.currentData(),
                 shadow_bias=self.bias_spin.value(), pcf_radius=self.pcf_combo.currentData(),
                 render_path=self.render_path_combo.currentData(),
-                light_count=self.light_count_combo.currentData())
+                light_count=self.light_count_combo.currentData(),
+                hdr=self.config.hdr.changed(
+                    self.hdr_enabled_check.isChecked(),
+                    self.hdr_tone_combo.currentData(),
+                    self.hdr_exposure_spin.value(),
+                    self.hdr_debug_combo.currentData()))
         except ValueError as error:
             self.source_warning = str(error); self.refresh(); return
         mesh_changed = (new_config.source_mode != self.config.source_mode or
@@ -1278,7 +1477,9 @@ class Pipeline3DPanel(QWidget):
                     self.ambient_spin, self.diffuse_spin, self.specular_spin,
                     self.shininess_spin, self.shadow_check,
                     self.shadow_resolution_combo, self.bias_spin, self.pcf_combo,
-                    self.render_path_combo, self.light_count_combo)
+                    self.render_path_combo, self.light_count_combo,
+                    self.hdr_enabled_check, self.hdr_tone_combo,
+                    self.hdr_exposure_spin, self.hdr_debug_combo)
         for control in controls: control.blockSignals(True)
         self.source_combo.setCurrentIndex(self.source_combo.findData(self.config.source_mode))
         self.depth_spin.setValue(self.config.extrusion_depth)
@@ -1304,6 +1505,12 @@ class Pipeline3DPanel(QWidget):
             self.render_path_combo.findData(self.config.render_path))
         self.light_count_combo.setCurrentIndex(
             self.light_count_combo.findData(self.config.light_count))
+        self.hdr_enabled_check.setChecked(self.config.hdr.enabled)
+        self.hdr_tone_combo.setCurrentIndex(
+            self.hdr_tone_combo.findData(self.config.hdr.tone_mapper))
+        self.hdr_exposure_spin.setValue(self.config.hdr.exposure)
+        self.hdr_debug_combo.setCurrentIndex(
+            self.hdr_debug_combo.findData(self.config.hdr.debug_view))
         for control in controls: control.blockSignals(False)
         self._updating = False
         mesh = self.viewport.mesh; state = self.viewport.runtime_state()
@@ -1349,4 +1556,10 @@ class Pipeline3DPanel(QWidget):
             f"approx {state['gbuffer_bytes'] / 1048576:.2f} MiB\n"
             f"G-buffer passes {state['gbuffer_passes']} · lighting passes "
             f"{state['lighting_passes']} · manual attachments "
-            f"{state['attachment_passes']}{warning}{error}")
+            f"{state['attachment_passes']}\n"
+            f"HDR {'on' if state['hdr_enabled'] else 'off'} · "
+            f"{state['hdr_tone_mapper']} {state['hdr_exposure']:.2f}× · "
+            f"{state['hdr_debug_view']} · target {state['hdr_size'][0]}×"
+            f"{state['hdr_size'][1]} · approx {state['hdr_bytes'] / 1048576:.2f} MiB · "
+            f"passes/frames {state['hdr_passes']}/{state['hdr_frames']}"
+            f"{warning}{error}")

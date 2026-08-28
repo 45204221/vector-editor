@@ -2,7 +2,7 @@
 
 > 文档用途：后续阶段开发的设计依据、执行计划和结果记录  
 > 建立日期：2026-07-27  
-> 当前状态：M20.1 主画布 HDR 已实现；M21 综合图形管线收束阶段临时计划已完成，待实施
+> 当前状态：M21.0/M21.1 已完成；正在实施 M21.2 Bloom 多级后处理
 
 ## 1. 使用规则
 
@@ -1561,7 +1561,7 @@ C++ 读取固定的 24-byte 顶点格式和 draw command；Python 仍管理 Qt �
 
 #### 状态与执行方式
 
-- 状态：计划完成，尚未开始功能编码。
+- 状态：连续实施中；M21.0 基线与共享契约、M21.1 3D HDR 已完成，进入 M21.2。
 - 工作基线：以包含 M19.2 和 M20.1 的 `feature/m20-canvas-hdr` 为功能基线；单独使用综合开发分支，不依赖远程仓库状态。
 - 本轮目标：最大限度集中完成此前已经明确记录、且能强化“可视、可用、可讲”定位的未实现功能；不在每个内部切片后等待 GUI 验收或远程合并，全部切片完成后再统一交付。
 - “一次完成”不等于一次巨型提交。实现按下列依赖顺序连续推进，每个切片必须通过定向测试、完整自动化和短时真实 OpenGL smoke 才能进入下一切片，并保留独立可回滚提交。
@@ -1695,3 +1695,12 @@ C++ 读取固定的 24-byte 顶点格式和 draw command；Python 仍管理 Qt �
 - `tests/`、`benchmarks/`、README 与本计划：同步增加 parity、真实 context、资源、性能和讲解材料。
 
 任何需要改变 Canvas/Shape 序列化 schema、撤销模型、跨 context GPU 资源共享或完整 Renderer 所有权的方案，必须暂停该子项并先修改本计划；不得以“一次完成”为理由扩大基础架构风险。
+
+#### M21.0/M21.1 实施回填
+
+- 基线：原生模块重建成功，M20.1 初始完整测试 141/141；主画布 HDR 与原 3D OpenGL smoke 均无失败。基线 3D viewport 为 OpenGL 4.6、36 vertices、1 次 mesh upload，G-buffer 约 9.36–10.19 MiB（随 viewport 尺寸变化）。
+- 共享契约：原 `CanvasHdrConfig` 提升为后端无关 `ToneMappingConfig` 并保留兼容别名；新增 IEC sRGB 编解码和 Rec.709 线性亮度 reference。`Pipeline3DConfig` 通过不可变嵌套配置复用同一 Tone Mapping 定义。
+- 3D GPU：Forward 与 Deferred 最终颜色均可写入 viewport-size `RGBA16F + CombinedDepthStencil`，再由共享数学公式执行 Linear/Reinhard/ACES、exposure、亮度热力图、过曝遮罩和 gamma 2.2。两个 context 仅共享 CPU 配置，不共享 FBO/texture。
+- 附件/UI：3D 页增加 HDR 开关、算子、曝光和调试视图；附件页增加 HDR Scene 与 Tone Mapped Output；状态显示 target、估算 bytes、pass/frame。所有变化保持 Canvas revision/History 中立。
+- 真实验证：Forward Linear/Reinhard/ACES heatmap 与 Deferred ACES final/overexposure 五种 case 得到五个不同 framebuffer signature；HDR target `677×658`、约 5.10 MiB，mesh upload 始终为 1，无 Shader/FBO 错误，HDR Scene 与最终附件签名不同。
+- 自动化：共享契约、sRGB round-trip、亮度、3D 配置和 UI 中立性新增 3 项测试；完整结果 144/144。新增真实 smoke `opengl_pipeline3d_hdr_smoke.py`。
