@@ -39,6 +39,16 @@ class NativeGeometryTests(unittest.TestCase):
         self.assertEqual(native_geometry.backend_name(), "Python reference")
         self.assertEqual(expected, actual)
 
+    def test_dash_arc_length_golden_and_native_parity(self):
+        points = ((0, 0), (10, 0), (10, 10))
+        expected = reference.dash_polyline(points, (4, 2))
+        self.assertEqual(expected[:4], ((0.0, 0.0), (4.0, 0.0),
+                                        (6.0, 0.0), (10.0, 0.0)))
+        actual = native_geometry.dash_polyline(points, (4, 2))
+        assert_mesh_close(self, expected, actual)
+        # Phase continues around the corner instead of restarting each segment.
+        self.assertEqual(expected[4], (10.0, 2.0))
+
     @unittest.skipUnless(native_geometry.is_available(), "native module not built")
     def test_all_join_cap_and_closed_modes_match_reference(self):
         paths = (

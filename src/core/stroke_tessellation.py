@@ -6,6 +6,38 @@ import math
 EPSILON = 1e-8
 
 
+def dash_polyline(points, pattern, offset=0.0, closed=False):
+    """Return flat on-segment endpoint pairs using continuous arc length."""
+    clean = _clean_points(points, closed)
+    pattern = tuple(float(value) for value in pattern)
+    if len(clean) < 2 or not pattern or any(value <= EPSILON for value in pattern):
+        return ()
+    if len(pattern) % 2: pattern = pattern * 2
+    if closed: clean.append(clean[0])
+    period = sum(pattern); phase = float(offset) % period; pattern_index = 0
+    while phase >= pattern[pattern_index] - EPSILON:
+        phase -= pattern[pattern_index]; pattern_index = (pattern_index + 1) % len(pattern)
+    remaining = pattern[pattern_index] - phase; draw = pattern_index % 2 == 0
+    output = []
+    for first, second in zip(clean, clean[1:]):
+        dx, dy = second[0] - first[0], second[1] - first[1]
+        length = math.hypot(dx, dy)
+        if length <= EPSILON: continue
+        cursor = 0.0
+        while cursor < length - EPSILON:
+            step = min(remaining, length - cursor)
+            if draw and step > EPSILON:
+                output.extend(((first[0] + dx * cursor / length,
+                                first[1] + dy * cursor / length),
+                               (first[0] + dx * (cursor + step) / length,
+                                first[1] + dy * (cursor + step) / length)))
+            cursor += step; remaining -= step
+            if remaining <= EPSILON:
+                pattern_index = (pattern_index + 1) % len(pattern)
+                remaining = pattern[pattern_index]; draw = pattern_index % 2 == 0
+    return tuple(output)
+
+
 def _add(first, second):
     return first[0] + second[0], first[1] + second[1]
 

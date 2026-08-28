@@ -30,4 +30,8 @@ Mesh3 tessellate_stroke_coverage(
     double antialias_width = 1.0, double miter_limit = 4.0,
     int round_segments = 8);
 
+Mesh2 dash_polyline(const std::vector<Point2>& points,
+                    const std::vector<double>& pattern, double offset = 0.0,
+                    bool closed = false);
+
 }  // namespace vector_engine

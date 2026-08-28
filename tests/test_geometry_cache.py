@@ -72,6 +72,15 @@ class GeometryCacheTests(unittest.TestCase):
         self.assertEqual(connection_primitive.topology, PrimitiveTopology.LINE_STRIP)
         self.assertGreaterEqual(len(connection_primitive.vertices), 2)
 
+    def test_dashed_stroke_compiles_to_gpu_line_segments(self):
+        line = self.canvas.create_line(0, 0, 60, 0)
+        line.style.pen_style = 2
+        self.canvas.add_shape(line)
+        cache = GeometryCache(); cache.sync_snapshot(self.canvas.create_render_snapshot())
+        primitive = cache.primitives()[0]
+        self.assertEqual(primitive.topology, PrimitiveTopology.LINES)
+        self.assertGreater(len(primitive.vertices), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

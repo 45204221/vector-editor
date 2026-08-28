@@ -256,6 +256,25 @@ PyObject* py_tessellate_stroke_coverage(PyObject*, PyObject* args, PyObject* kwa
     }
 }
 
+PyObject* py_dash_polyline(PyObject*, PyObject* args, PyObject* kwargs) {
+    PyObject *points_object = nullptr, *pattern_object = nullptr;
+    double offset = 0.0; int closed = 0;
+    static const char* names[] = {"points", "pattern", "offset", "closed", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|dp", const_cast<char**>(names),
+                                     &points_object, &pattern_object, &offset, &closed)) return nullptr;
+    std::vector<vector_engine::Point2> points;
+    if (!parse_points(points_object, points)) return nullptr;
+    PyObject* sequence = PySequence_Fast(pattern_object, "pattern must be a sequence");
+    if (!sequence) return nullptr;
+    std::vector<double> pattern;
+    for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(sequence); ++index) {
+        pattern.push_back(PyFloat_AsDouble(PySequence_Fast_GET_ITEM(sequence, index)));
+        if (PyErr_Occurred()) { Py_DECREF(sequence); return nullptr; }
+    }
+    Py_DECREF(sequence);
+    return mesh2_to_tuple(vector_engine::dash_polyline(points, pattern, offset, closed != 0));
+}
+
 PyObject* py_visibility_polygon(PyObject*, PyObject* args, PyObject* kwargs) {
     PyObject* light_object = nullptr;
     PyObject* segments_object = nullptr;
@@ -543,6 +562,9 @@ PyMethodDef methods[] = {
      reinterpret_cast<PyCFunction>(py_tessellate_stroke_coverage),
      METH_VARARGS | METH_KEYWORDS,
      "Tessellate a polyline into x/y/coverage triangles."},
+    {"dash_polyline", reinterpret_cast<PyCFunction>(py_dash_polyline),
+     METH_VARARGS | METH_KEYWORDS,
+     "Split a polyline into visible dash endpoint pairs by arc length."},
     {"visibility_polygon", reinterpret_cast<PyCFunction>(py_visibility_polygon),
      METH_VARARGS | METH_KEYWORDS,
      "Compute a 2D visibility polygon and nearest-hit rays."},
