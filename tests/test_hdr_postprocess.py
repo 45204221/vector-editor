@@ -12,7 +12,8 @@ if SRC not in sys.path:
 from PyQt5.QtWidgets import QApplication
 from core import native_hdr
 from core.hdr_postprocess import (CanvasHdrConfig, ToneMappingConfig,
-                                  linear_to_srgb, relative_luminance,
+                                  bloom_soft_threshold, linear_to_srgb,
+                                  relative_luminance,
                                   srgb_to_linear, tone_map_rgb)
 from ui.main_window import MainWindow
 
@@ -70,6 +71,22 @@ class HdrToneMappingTests(unittest.TestCase):
             linear_to_srgb(-0.1)
         with self.assertRaises(ValueError):
             relative_luminance((1.0, 0.0))
+
+    def test_bloom_soft_threshold_and_native_parity(self):
+        soft = bloom_soft_threshold((0.2, 0.4, 0.8), 1.0, 0.5)
+        self.assertTrue(all(0.0 < selected < source
+                            for selected, source in zip(soft, (0.2, 0.4, 0.8))))
+        self.assertEqual(bloom_soft_threshold((0.2, 0.4, 0.8), 1.0, 0.0),
+                         (0.0, 0.0, 0.0))
+        selected = bloom_soft_threshold((4.0, 2.0, 0.5), 1.0, 0.5)
+        self.assertGreater(selected[0], selected[1])
+        self.assertGreater(selected[1], selected[2])
+        actual, backend = native_hdr.bloom_soft_threshold(
+            (4.0, 2.0, 0.5), 1.0, 0.5)
+        expected = bloom_soft_threshold((4.0, 2.0, 0.5), 1.0, 0.5)
+        for first, second in zip(actual, expected):
+            self.assertAlmostEqual(first, second, places=12)
+        self.assertIn(backend, ("C++ native", "Python reference"))
 
     @unittest.skipUnless(native_hdr.is_available(), "native HDR ABI not built")
     def test_cpp_python_parity(self):

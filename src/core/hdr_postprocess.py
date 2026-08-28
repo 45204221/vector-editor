@@ -91,6 +91,27 @@ def relative_luminance(rgb):
     return 0.2126 * values[0] + 0.7152 * values[1] + 0.0722 * values[2]
 
 
+def bloom_soft_threshold(rgb, threshold=1.0, knee=0.5):
+    """Return the linear HDR contribution selected for Bloom."""
+    values = tuple(float(value) for value in rgb)
+    threshold, knee = float(threshold), float(knee)
+    if len(values) != 3 or not all(math.isfinite(value) for value in values):
+        raise ValueError("rgb must contain three finite values")
+    if any(value < 0.0 for value in values):
+        raise ValueError("HDR color channels cannot be negative")
+    if not math.isfinite(threshold) or threshold < 0.0:
+        raise ValueError("threshold must be finite and non-negative")
+    if not math.isfinite(knee) or not 0.0 <= knee <= 1.0:
+        raise ValueError("knee must be finite and between 0 and 1")
+    brightness = max(values)
+    soft_width = max(1e-6, threshold * knee)
+    soft = max(0.0, min(2.0 * soft_width,
+                       brightness - threshold + soft_width))
+    soft = soft * soft / (4.0 * soft_width + 1e-6)
+    contribution = max(soft, brightness - threshold) / max(brightness, 1e-6)
+    return tuple(value * contribution for value in values)
+
+
 def tone_map_rgb(rgb, exposure=1.0, tone_mapper="reinhard", gamma=2.2):
     """Map a non-negative linear HDR RGB triplet into display RGB."""
     values = tuple(float(value) for value in rgb)

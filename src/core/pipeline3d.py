@@ -18,6 +18,8 @@ ATTACHMENT_MODES = (("Normal RGB", "normal"),
                     ("G-Normal", "g_normal"),
                     ("G-Albedo", "g_albedo"),
                     ("HDR Scene (RGBA16F)", "hdr_scene"),
+                    ("Bloom Near Level", "bloom_near"),
+                    ("Bloom Far Level", "bloom_far"),
                     ("Tone Mapped Output", "hdr_final"))
 
 
@@ -52,6 +54,11 @@ class Pipeline3DConfig:
     render_path: str = "forward"
     light_count: int = 4
     hdr: ToneMappingConfig = field(default_factory=ToneMappingConfig)
+    bloom_enabled: bool = False
+    bloom_threshold: float = 1.0
+    bloom_knee: float = 0.5
+    bloom_intensity: float = 0.8
+    bloom_levels: int = 5
 
     def __post_init__(self):
         if self.source_mode not in ("cube", "selection"):
@@ -83,6 +90,14 @@ class Pipeline3DConfig:
             raise ValueError("light count must be 1, 4 or 8")
         if not isinstance(self.hdr, ToneMappingConfig):
             raise TypeError("hdr must be a ToneMappingConfig")
+        if not 0.0 <= self.bloom_threshold <= 16.0:
+            raise ValueError("bloom threshold must be between 0 and 16")
+        if not 0.0 <= self.bloom_knee <= 1.0:
+            raise ValueError("bloom knee must be between 0 and 1")
+        if not 0.0 <= self.bloom_intensity <= 4.0:
+            raise ValueError("bloom intensity must be between 0 and 4")
+        if self.bloom_levels not in (1, 2, 3, 4, 5):
+            raise ValueError("bloom levels must be between 1 and 5")
 
     def changed(self, **changes):
         return replace(self, **changes)

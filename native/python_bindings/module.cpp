@@ -456,6 +456,22 @@ PyObject* py_tone_map_rgb(PyObject*, PyObject* args, PyObject* kwargs) {
     }
 }
 
+PyObject* py_bloom_soft_threshold(PyObject*, PyObject* args, PyObject* kwargs) {
+    double red = 0.0, green = 0.0, blue = 0.0, threshold = 1.0, knee = 0.5;
+    static const char* names[] = {"red", "green", "blue", "threshold",
+                                  "knee", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ddddd",
+            const_cast<char**>(names), &red, &green, &blue, &threshold,
+            &knee)) return nullptr;
+    try {
+        const auto result = vector_engine::bloom_soft_threshold(
+            {red, green, blue}, threshold, knee);
+        return Py_BuildValue("(ddd)", result[0], result[1], result[2]);
+    } catch (const std::exception& error) {
+        PyErr_SetString(PyExc_ValueError, error.what()); return nullptr;
+    }
+}
+
 PyMethodDef methods[] = {
     {"tessellate_stroke", reinterpret_cast<PyCFunction>(py_tessellate_stroke),
      METH_VARARGS | METH_KEYWORDS, "Tessellate a polyline into 2D triangles."},
@@ -483,6 +499,10 @@ PyMethodDef methods[] = {
     {"tone_map_rgb", reinterpret_cast<PyCFunction>(py_tone_map_rgb),
      METH_VARARGS | METH_KEYWORDS,
      "Apply Linear, Reinhard or ACES tone mapping to one linear HDR color."},
+    {"bloom_soft_threshold",
+     reinterpret_cast<PyCFunction>(py_bloom_soft_threshold),
+     METH_VARARGS | METH_KEYWORDS,
+     "Select the soft-thresholded HDR contribution used by Bloom."},
     {nullptr, nullptr, 0, nullptr},
 };
 

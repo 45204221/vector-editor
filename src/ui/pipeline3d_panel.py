@@ -9,7 +9,8 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import (QMatrix4x4, QOpenGLBuffer, QOpenGLContext,
                          QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat,
                          QOpenGLShader, QOpenGLShaderProgram, QOpenGLVersionProfile,
-                         QOpenGLVertexArrayObject, QImage, QPixmap, QVector3D)
+                         QOpenGLVertexArrayObject, QImage, QPixmap, QVector2D,
+                         QVector3D)
 from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
                              QGroupBox, QHBoxLayout, QLabel, QOpenGLWidget,
                              QPushButton, QScrollArea, QSpinBox, QSplitter,
@@ -264,6 +265,12 @@ uniform sampler2D u_hdr_scene;
 uniform int u_tone_mapper;
 uniform float u_exposure;
 uniform int u_debug_view;
+uniform int u_bloom_enabled;
+uniform float u_bloom_intensity;
+uniform int u_bloom_levels;
+uniform sampler2D u_bloom0; uniform sampler2D u_bloom1;
+uniform sampler2D u_bloom2; uniform sampler2D u_bloom3;
+uniform sampler2D u_bloom4;
 varying vec2 v_uv;
 
 vec3 tone_map(vec3 value) {
@@ -280,7 +287,17 @@ vec3 heatmap(float value) {
 }
 void main() {
     vec4 source = texture2D(u_hdr_scene, v_uv);
-    vec3 exposed = max(source.rgb, vec3(0.0)) * u_exposure;
+    vec3 bloom = vec3(0.0);
+    if (u_bloom_enabled != 0) {
+        if (u_bloom_levels > 0) bloom += texture2D(u_bloom0, v_uv).rgb;
+        if (u_bloom_levels > 1) bloom += texture2D(u_bloom1, v_uv).rgb;
+        if (u_bloom_levels > 2) bloom += texture2D(u_bloom2, v_uv).rgb;
+        if (u_bloom_levels > 3) bloom += texture2D(u_bloom3, v_uv).rgb;
+        if (u_bloom_levels > 4) bloom += texture2D(u_bloom4, v_uv).rgb;
+        float level_count = u_bloom_levels > 0 ? float(u_bloom_levels) : 1.0;
+        bloom *= u_bloom_intensity / level_count;
+    }
+    vec3 exposed = max(source.rgb + bloom, vec3(0.0)) * u_exposure;
     if (u_debug_view == 1) {
         float luminance = dot(exposed, vec3(0.2126, 0.7152, 0.0722));
         gl_FragColor = vec4(heatmap(luminance), source.a); return;
@@ -292,6 +309,42 @@ void main() {
         return;
     }
     gl_FragColor = vec4(pow(tone_map(exposed), vec3(1.0 / 2.2)), source.a);
+}
+"""
+
+BLOOM_FRAGMENT_SHADER = """
+#ifdef GL_ES
+precision highp float;
+#endif
+uniform sampler2D u_source;
+uniform vec2 u_texel;
+uniform int u_extract;
+uniform float u_threshold;
+uniform float u_knee;
+varying vec2 v_uv;
+
+vec3 select_bright(vec3 color) {
+    if (u_extract == 0) return color;
+    float brightness = max(max(color.r, color.g), color.b);
+    float width = max(0.000001, u_threshold * u_knee);
+    float soft = clamp(brightness - u_threshold + width, 0.0, 2.0 * width);
+    soft = soft * soft / (4.0 * width + 0.000001);
+    float contribution = max(soft, brightness - u_threshold) /
+                         max(brightness, 0.000001);
+    return color * contribution;
+}
+void main() {
+    vec2 t = u_texel;
+    vec3 color = select_bright(texture2D(u_source, v_uv).rgb) * 0.25;
+    color += select_bright(texture2D(u_source, v_uv + vec2(t.x, 0.0)).rgb) * 0.125;
+    color += select_bright(texture2D(u_source, v_uv - vec2(t.x, 0.0)).rgb) * 0.125;
+    color += select_bright(texture2D(u_source, v_uv + vec2(0.0, t.y)).rgb) * 0.125;
+    color += select_bright(texture2D(u_source, v_uv - vec2(0.0, t.y)).rgb) * 0.125;
+    color += select_bright(texture2D(u_source, v_uv + t).rgb) * 0.0625;
+    color += select_bright(texture2D(u_source, v_uv - t).rgb) * 0.0625;
+    color += select_bright(texture2D(u_source, v_uv + vec2(t.x, -t.y)).rgb) * 0.0625;
+    color += select_bright(texture2D(u_source, v_uv + vec2(-t.x, t.y)).rgb) * 0.0625;
+    gl_FragColor = vec4(color, 1.0);
 }
 """
 
@@ -363,6 +416,7 @@ class Pipeline3DViewport(QOpenGLWidget):
         self.gbuffer_program = None
         self.deferred_program = None
         self.hdr_program = None
+        self.bloom_program = None
         self.buffer = None
         self.vertex_array = None
         self.quad_buffer = None
@@ -382,12 +436,14 @@ class Pipeline3DViewport(QOpenGLWidget):
         self.gbuffer_target = None
         self.hdr_target = None
         self.hdr_preview_target = None
+        self.bloom_targets = []
         self.shadow_passes = 0
         self.attachment_passes = 0
         self.gbuffer_passes = 0
         self.lighting_passes = 0
         self.hdr_passes = 0
         self.hdr_frames = 0
+        self.bloom_passes = 0
 
     def set_mesh(self, mesh):
         self.mesh = mesh
@@ -447,6 +503,17 @@ class Pipeline3DViewport(QOpenGLWidget):
             hdr_program.bindAttributeLocation("a_uv", 1)
             if not hdr_program.link():
                 raise RuntimeError(hdr_program.log())
+            bloom_program = QOpenGLShaderProgram()
+            if not bloom_program.addShaderFromSourceCode(
+                    QOpenGLShader.Vertex, QUAD_VERTEX_SHADER):
+                raise RuntimeError(bloom_program.log())
+            if not bloom_program.addShaderFromSourceCode(
+                    QOpenGLShader.Fragment, BLOOM_FRAGMENT_SHADER):
+                raise RuntimeError(bloom_program.log())
+            bloom_program.bindAttributeLocation("a_position", 0)
+            bloom_program.bindAttributeLocation("a_uv", 1)
+            if not bloom_program.link():
+                raise RuntimeError(bloom_program.log())
             buffer = QOpenGLBuffer(QOpenGLBuffer.VertexBuffer)
             vertex_array = QOpenGLVertexArrayObject()
             quad_buffer = QOpenGLBuffer(QOpenGLBuffer.VertexBuffer)
@@ -475,12 +542,14 @@ class Pipeline3DViewport(QOpenGLWidget):
             self.program, self.buffer, self.vertex_array = program, buffer, vertex_array
             self.gbuffer_program, self.deferred_program = gbuffer_program, deferred_program
             self.hdr_program = hdr_program
+            self.bloom_program = bloom_program
             self.quad_buffer, self.quad_vertex_array = quad_buffer, quad_vertex_array
             self.shadow_target = self.normal_target = self.depth_target = None
             self.comparison_target = None
             self.comparison_targets = {}
             self.gbuffer_target = None
             self.hdr_target = self.hdr_preview_target = None
+            self.bloom_targets = []
             self.upload_pending = True
             self.last_error = ""
         except Exception as error:
@@ -555,6 +624,59 @@ class Pipeline3DViewport(QOpenGLWidget):
             raise RuntimeError(f"无法创建 3D HDR preview {width}x{height}")
         self.hdr_preview_target = target
         return target
+
+    def _bloom_pyramid(self, width, height, levels):
+        sizes = []
+        current_width, current_height = max(1, width // 2), max(1, height // 2)
+        for _ in range(levels):
+            sizes.append((current_width, current_height))
+            current_width = max(1, current_width // 2)
+            current_height = max(1, current_height // 2)
+        existing = [(target.size().width(), target.size().height())
+                    for target in self.bloom_targets]
+        if existing == sizes and all(target.isValid() for target in self.bloom_targets):
+            return self.bloom_targets
+        format_ = QOpenGLFramebufferObjectFormat()
+        format_.setAttachment(QOpenGLFramebufferObject.NoAttachment)
+        format_.setInternalTextureFormat(GL_RGBA16F)
+        targets = []
+        for target_width, target_height in sizes:
+            target = QOpenGLFramebufferObject(target_width, target_height, format_)
+            if not target.isValid():
+                raise RuntimeError(
+                    f"无法创建 Bloom framebuffer {target_width}x{target_height}")
+            targets.append(target)
+        self.bloom_targets = targets
+        return targets
+
+    def _render_bloom(self, source_target):
+        targets = self._bloom_pyramid(
+            source_target.size().width(), source_target.size().height(),
+            self.config.bloom_levels)
+        source = source_target
+        self.quad_vertex_array.bind(); self.quad_buffer.bind()
+        for index, target in enumerate(targets):
+            target.bind()
+            self.functions.glViewport(0, 0, target.size().width(),
+                                      target.size().height())
+            self.functions.glDisable(GL_DEPTH_TEST); self.functions.glDisable(GL_CULL_FACE)
+            self.functions.glClearColor(0.0, 0.0, 0.0, 1.0)
+            self.functions.glClear(GL_COLOR_BUFFER_BIT)
+            self.functions.glActiveTexture(GL_TEXTURE0)
+            self.functions.glBindTexture(GL_TEXTURE_2D, source.texture())
+            program = self.bloom_program; program.bind()
+            program.setUniformValue("u_source", 0)
+            program.setUniformValue("u_texel", QVector2D(
+                1.0 / source.size().width(), 1.0 / source.size().height()))
+            program.setUniformValue("u_extract", 1 if index == 0 else 0)
+            program.setUniformValue("u_threshold", self.config.bloom_threshold)
+            program.setUniformValue("u_knee", self.config.bloom_knee)
+            self.functions.glDrawArrays(GL_TRIANGLES, 0, 6)
+            program.release(); target.release()
+            source = target; self.bloom_passes += 1
+        self.functions.glBindTexture(GL_TEXTURE_2D, 0)
+        self.quad_buffer.release(); self.quad_vertex_array.release()
+        return targets
 
     def _set_common_uniforms(self, model, view, projection, mode):
         _, _, light_vp = light_matrices(self.config)
@@ -776,6 +898,13 @@ class Pipeline3DViewport(QOpenGLWidget):
         self.functions.glClear(GL_COLOR_BUFFER_BIT)
         self.functions.glActiveTexture(GL_TEXTURE0)
         self.functions.glBindTexture(GL_TEXTURE_2D, source_target.texture())
+        bloom_targets = (self.bloom_targets[:self.config.bloom_levels]
+                         if self.config.bloom_enabled else [])
+        for index in range(5):
+            self.functions.glActiveTexture(GL_TEXTURE0 + 1 + index)
+            texture = (bloom_targets[index].texture()
+                       if index < len(bloom_targets) else 0)
+            self.functions.glBindTexture(GL_TEXTURE_2D, texture)
         program = self.hdr_program
         self.quad_vertex_array.bind(); self.quad_buffer.bind(); program.bind()
         program.setUniformValue("u_hdr_scene", 0)
@@ -786,9 +915,17 @@ class Pipeline3DViewport(QOpenGLWidget):
         program.setUniformValue("u_debug_view", {
             "final": 0, "heatmap": 1, "overexposure": 2,
         }[self.config.hdr.debug_view])
+        program.setUniformValue("u_bloom_enabled", 1 if bloom_targets else 0)
+        program.setUniformValue("u_bloom_intensity", self.config.bloom_intensity)
+        program.setUniformValue("u_bloom_levels", len(bloom_targets))
+        for index in range(5):
+            program.setUniformValue(f"u_bloom{index}", 1 + index)
         self.functions.glDrawArrays(GL_TRIANGLES, 0, 6)
         program.release(); self.quad_buffer.release(); self.quad_vertex_array.release()
-        self.functions.glBindTexture(GL_TEXTURE_2D, 0)
+        for unit in range(6):
+            self.functions.glActiveTexture(GL_TEXTURE0 + unit)
+            self.functions.glBindTexture(GL_TEXTURE_2D, 0)
+        self.functions.glActiveTexture(GL_TEXTURE0)
         if output_target is not None:
             output_target.release()
         self.hdr_passes += 1
@@ -796,13 +933,20 @@ class Pipeline3DViewport(QOpenGLWidget):
     def render_attachment(self, kind):
         if kind not in ("normal", "depth", "shadow",
                         "g_position", "g_normal", "g_albedo",
-                        "hdr_scene", "hdr_final"):
+                        "hdr_scene", "hdr_final", "bloom_near",
+                        "bloom_far"):
             raise ValueError("invalid 3D attachment")
         try:
             self.makeCurrent()
             if self.upload_pending and not self._upload():
                 return None
-            if kind in ("hdr_scene", "hdr_final"):
+            if kind in ("bloom_near", "bloom_far"):
+                if not self.bloom_targets:
+                    self.doneCurrent(); return None
+                target = (self.bloom_targets[0] if kind == "bloom_near"
+                          else self.bloom_targets[-1])
+                image = target.toImage()
+            elif kind in ("hdr_scene", "hdr_final"):
                 target = self.hdr_target
                 if target is None or not target.isValid():
                     self.doneCurrent(); return None
@@ -865,10 +1009,17 @@ class Pipeline3DViewport(QOpenGLWidget):
                 self._render_deferred_lighting(
                     gbuffer, shadow_target, hdr_target)
                 if hdr_target is not None:
+                    if self.config.bloom_enabled:
+                        stage = "bloom"
+                        self._render_bloom(hdr_target)
                     stage = "hdr-post"
                     self._render_hdr_post(hdr_target)
                     self.hdr_frames += 1
-                self.draw_calls = ((6 if shadow_required else 4)
+                bloom_draws = (self.config.bloom_levels
+                               if hdr_target is not None and
+                               self.config.bloom_enabled else 0)
+                self.draw_calls = ((6 + bloom_draws if shadow_required
+                                    else 4 + bloom_draws)
                                    if hdr_target is not None else
                                    (5 if shadow_required else 3))
                 self.last_error = ""
@@ -919,10 +1070,17 @@ class Pipeline3DViewport(QOpenGLWidget):
                 self.functions.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
             if hdr_target is not None:
                 hdr_target.release()
+                if self.config.bloom_enabled:
+                    stage = "bloom"
+                    self._render_bloom(hdr_target)
                 stage = "hdr-post"
                 self._render_hdr_post(hdr_target)
                 self.hdr_frames += 1
-            self.draw_calls = ((5 if shadow_required else 3)
+            bloom_draws = (self.config.bloom_levels
+                           if hdr_target is not None and
+                           self.config.bloom_enabled else 0)
+            self.draw_calls = ((5 + bloom_draws if shadow_required
+                                else 3 + bloom_draws)
                                if hdr_target is not None else
                                (4 if shadow_required else 2))
             self.last_error = ""
@@ -992,6 +1150,16 @@ class Pipeline3DViewport(QOpenGLWidget):
             "hdr_bytes": max(1, self.width()) * max(1, self.height()) * 12,
             "hdr_passes": self.hdr_passes,
             "hdr_frames": self.hdr_frames,
+            "bloom_enabled": self.config.bloom_enabled,
+            "bloom_levels": self.config.bloom_levels,
+            "bloom_threshold": self.config.bloom_threshold,
+            "bloom_knee": self.config.bloom_knee,
+            "bloom_intensity": self.config.bloom_intensity,
+            "bloom_passes": self.bloom_passes,
+            "bloom_sizes": tuple((target.size().width(), target.size().height())
+                                 for target in self.bloom_targets),
+            "bloom_bytes": sum(target.size().width() * target.size().height() * 8
+                               for target in self.bloom_targets),
             "error": self.last_error or self.mesh.error,
         }
 
@@ -1133,10 +1301,22 @@ class Pipeline3DPanel(QWidget):
         self.hdr_debug_combo = QComboBox()
         for label, value in HDR_DEBUG_VIEWS:
             self.hdr_debug_combo.addItem(label, value)
+        self.bloom_enabled_check = QCheckBox("启用多级 Bloom")
+        self.bloom_threshold_spin = self._spin(0.0, 16.0, 1.0, 0.1, 2)
+        self.bloom_knee_spin = self._spin(0.0, 1.0, 0.5, 0.05, 2)
+        self.bloom_intensity_spin = self._spin(0.0, 4.0, 0.8, 0.1, 2)
+        self.bloom_levels_combo = QComboBox()
+        for level in range(1, 6):
+            self.bloom_levels_combo.addItem(f"{level} levels", level)
         hdr_form.addRow(self.hdr_enabled_check)
         hdr_form.addRow("Tone mapper", self.hdr_tone_combo)
         hdr_form.addRow("Exposure", self.hdr_exposure_spin)
         hdr_form.addRow("Debug view", self.hdr_debug_combo)
+        hdr_form.addRow(self.bloom_enabled_check)
+        hdr_form.addRow("Bloom threshold", self.bloom_threshold_spin)
+        hdr_form.addRow("Soft knee", self.bloom_knee_spin)
+        hdr_form.addRow("Bloom intensity", self.bloom_intensity_spin)
+        hdr_form.addRow("Bloom pyramid", self.bloom_levels_combo)
         self.hdr_note = QLabel(
             "Forward/Deferred 共用线性 HDR → Tone Mapping → gamma 2.2；"
             "配置只影响实验 viewport。")
@@ -1270,7 +1450,9 @@ class Pipeline3DPanel(QWidget):
                         self.pcf_combo, self.render_path_combo,
                         self.light_count_combo, self.hdr_enabled_check,
                         self.hdr_tone_combo, self.hdr_exposure_spin,
-                        self.hdr_debug_combo):
+                        self.hdr_debug_combo, self.bloom_enabled_check,
+                        self.bloom_threshold_spin, self.bloom_knee_spin,
+                        self.bloom_intensity_spin, self.bloom_levels_combo):
             signal = (control.toggled if isinstance(control, QCheckBox)
                       else control.currentIndexChanged if isinstance(control, QComboBox)
                       else control.valueChanged)
@@ -1436,7 +1618,12 @@ class Pipeline3DPanel(QWidget):
                     self.hdr_enabled_check.isChecked(),
                     self.hdr_tone_combo.currentData(),
                     self.hdr_exposure_spin.value(),
-                    self.hdr_debug_combo.currentData()))
+                    self.hdr_debug_combo.currentData()),
+                bloom_enabled=self.bloom_enabled_check.isChecked(),
+                bloom_threshold=self.bloom_threshold_spin.value(),
+                bloom_knee=self.bloom_knee_spin.value(),
+                bloom_intensity=self.bloom_intensity_spin.value(),
+                bloom_levels=self.bloom_levels_combo.currentData())
         except ValueError as error:
             self.source_warning = str(error); self.refresh(); return
         mesh_changed = (new_config.source_mode != self.config.source_mode or
@@ -1479,7 +1666,10 @@ class Pipeline3DPanel(QWidget):
                     self.shadow_resolution_combo, self.bias_spin, self.pcf_combo,
                     self.render_path_combo, self.light_count_combo,
                     self.hdr_enabled_check, self.hdr_tone_combo,
-                    self.hdr_exposure_spin, self.hdr_debug_combo)
+                    self.hdr_exposure_spin, self.hdr_debug_combo,
+                    self.bloom_enabled_check, self.bloom_threshold_spin,
+                    self.bloom_knee_spin, self.bloom_intensity_spin,
+                    self.bloom_levels_combo)
         for control in controls: control.blockSignals(True)
         self.source_combo.setCurrentIndex(self.source_combo.findData(self.config.source_mode))
         self.depth_spin.setValue(self.config.extrusion_depth)
@@ -1511,6 +1701,12 @@ class Pipeline3DPanel(QWidget):
         self.hdr_exposure_spin.setValue(self.config.hdr.exposure)
         self.hdr_debug_combo.setCurrentIndex(
             self.hdr_debug_combo.findData(self.config.hdr.debug_view))
+        self.bloom_enabled_check.setChecked(self.config.bloom_enabled)
+        self.bloom_threshold_spin.setValue(self.config.bloom_threshold)
+        self.bloom_knee_spin.setValue(self.config.bloom_knee)
+        self.bloom_intensity_spin.setValue(self.config.bloom_intensity)
+        self.bloom_levels_combo.setCurrentIndex(
+            self.bloom_levels_combo.findData(self.config.bloom_levels))
         for control in controls: control.blockSignals(False)
         self._updating = False
         mesh = self.viewport.mesh; state = self.viewport.runtime_state()
@@ -1561,5 +1757,10 @@ class Pipeline3DPanel(QWidget):
             f"{state['hdr_tone_mapper']} {state['hdr_exposure']:.2f}× · "
             f"{state['hdr_debug_view']} · target {state['hdr_size'][0]}×"
             f"{state['hdr_size'][1]} · approx {state['hdr_bytes'] / 1048576:.2f} MiB · "
-            f"passes/frames {state['hdr_passes']}/{state['hdr_frames']}"
+            f"passes/frames {state['hdr_passes']}/{state['hdr_frames']}\n"
+            f"Bloom {'on' if state['bloom_enabled'] else 'off'} · "
+            f"threshold/knee {state['bloom_threshold']:.2f}/"
+            f"{state['bloom_knee']:.2f} · intensity {state['bloom_intensity']:.2f} · "
+            f"levels {state['bloom_levels']} · approx "
+            f"{state['bloom_bytes'] / 1048576:.2f} MiB · passes {state['bloom_passes']}"
             f"{warning}{error}")

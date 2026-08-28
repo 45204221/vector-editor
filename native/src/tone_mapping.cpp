@@ -41,4 +41,28 @@ std::array<double, 3> tone_map_rgb(
     return output;
 }
 
+std::array<double, 3> bloom_soft_threshold(
+        const std::array<double, 3>& rgb, double threshold, double knee) {
+    if (!std::isfinite(threshold) || threshold < 0.0) {
+        throw std::invalid_argument("threshold must be finite and non-negative");
+    }
+    if (!std::isfinite(knee) || knee < 0.0 || knee > 1.0) {
+        throw std::invalid_argument("knee must be finite and between 0 and 1");
+    }
+    for (double value : rgb) {
+        if (!std::isfinite(value) || value < 0.0) {
+            throw std::invalid_argument("HDR color channels must be finite and non-negative");
+        }
+    }
+    const double brightness = std::max({rgb[0], rgb[1], rgb[2]});
+    const double soft_width = std::max(1e-6, threshold * knee);
+    double soft = std::clamp(
+        brightness - threshold + soft_width, 0.0, 2.0 * soft_width);
+    soft = soft * soft / (4.0 * soft_width + 1e-6);
+    const double contribution = std::max(soft, brightness - threshold) /
+        std::max(brightness, 1e-6);
+    return {rgb[0] * contribution, rgb[1] * contribution,
+            rgb[2] * contribution};
+}
+
 }  // namespace vector_engine

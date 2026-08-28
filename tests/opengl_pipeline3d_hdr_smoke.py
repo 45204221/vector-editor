@@ -36,11 +36,13 @@ def main():
     panel = window.pipeline3d_panel
     lab = window.engine_lab_window; lab.resize(1100, 780)
     viewport = panel.viewport
-    cases = (("forward", "linear", "final"),
-             ("forward", "reinhard", "final"),
-             ("forward", "aces", "heatmap"),
-             ("deferred", "aces", "final"),
-             ("deferred", "aces", "overexposure"))
+    cases = (("forward", "linear", "final", False),
+             ("forward", "reinhard", "final", False),
+             ("forward", "aces", "final", False),
+             ("forward", "aces", "final", True),
+             ("forward", "aces", "heatmap", True),
+             ("deferred", "aces", "final", True),
+             ("deferred", "aces", "overexposure", True))
     report, failures = {}, []
 
     def begin():
@@ -56,11 +58,12 @@ def main():
         if index >= len(cases):
             QTimer.singleShot(250, finish)
             return
-        path, tone, debug = cases[index]
+        path, tone, debug, bloom = cases[index]
         panel.render_path_combo.setCurrentIndex(
             panel.render_path_combo.findData(path))
         panel.hdr_tone_combo.setCurrentIndex(panel.hdr_tone_combo.findData(tone))
         panel.hdr_debug_combo.setCurrentIndex(panel.hdr_debug_combo.findData(debug))
+        panel.bloom_enabled_check.setChecked(bloom)
 
         def capture():
             report[str(cases[index])] = signature(viewport.grabFramebuffer())
@@ -69,11 +72,17 @@ def main():
 
     def finish():
         scene = viewport.render_attachment("hdr_scene")
+        bloom_near = viewport.render_attachment("bloom_near")
+        bloom_far = viewport.render_attachment("bloom_far")
         final = viewport.render_attachment("hdr_final")
         state = viewport.runtime_state()
         report["state"] = state
         report["attachments"] = {
             "scene": ((scene.width(), scene.height()), signature(scene)) if scene else None,
+            "bloom_near": ((bloom_near.width(), bloom_near.height()),
+                           signature(bloom_near)) if bloom_near else None,
+            "bloom_far": ((bloom_far.width(), bloom_far.height()),
+                          signature(bloom_far)) if bloom_far else None,
             "final": ((final.width(), final.height()), signature(final)) if final else None,
         }
         outputs = [report[str(case)] for case in cases]
@@ -81,7 +90,11 @@ def main():
             failures.append({"signatures": outputs})
         if (not state["hdr_valid"] or state["hdr_frames"] < len(cases)
                 or state["hdr_passes"] < len(cases)
+                or state["bloom_passes"] < state["bloom_levels"]
+                or len(state["bloom_sizes"]) != state["bloom_levels"]
                 or state["error"] or report["attachments"]["scene"] is None
+                or report["attachments"]["bloom_near"] is None
+                or report["attachments"]["bloom_far"] is None
                 or report["attachments"]["final"] is None
                 or report["attachments"]["scene"][1] == report["attachments"]["final"][1]):
             failures.append({"state": state, "attachments": report["attachments"]})

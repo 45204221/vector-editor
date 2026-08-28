@@ -2,7 +2,7 @@
 
 > 文档用途：后续阶段开发的设计依据、执行计划和结果记录  
 > 建立日期：2026-07-27  
-> 当前状态：M21.0/M21.1 已完成；正在实施 M21.2 Bloom 多级后处理
+> 当前状态：M21.0–M21.2 已完成；正在实施 M21.3 自动曝光与亮度直方图
 
 ## 1. 使用规则
 
@@ -1704,3 +1704,12 @@ C++ 读取固定的 24-byte 顶点格式和 draw command；Python 仍管理 Qt �
 - 附件/UI：3D 页增加 HDR 开关、算子、曝光和调试视图；附件页增加 HDR Scene 与 Tone Mapped Output；状态显示 target、估算 bytes、pass/frame。所有变化保持 Canvas revision/History 中立。
 - 真实验证：Forward Linear/Reinhard/ACES heatmap 与 Deferred ACES final/overexposure 五种 case 得到五个不同 framebuffer signature；HDR target `677×658`、约 5.10 MiB，mesh upload 始终为 1，无 Shader/FBO 错误，HDR Scene 与最终附件签名不同。
 - 自动化：共享契约、sRGB round-trip、亮度、3D 配置和 UI 中立性新增 3 项测试；完整结果 144/144。新增真实 smoke `opengl_pipeline3d_hdr_smoke.py`。
+
+#### M21.2 实施回填
+
+- C++/Python 新增相同的 soft-knee Bloom 高亮选择 reference；阈值下方过渡区保持连续非零贡献，knee=0 时退化为硬阈值。原生扩展重建成功并达到双精度 parity。
+- 3D viewport 新增最多五级的半分辨率 RGBA16F 金字塔；第一级执行 soft-threshold 和 9-tap 过滤，后续级继续 9-tap 降采样。避免每级双 ping-pong FBO，使当前 `677×658` viewport 的五级资源约 1.13 MiB。
+- HDR 合成 Shader 同时采样有效 Bloom levels，按 level count 归一并乘强度，在曝光和 Tone Mapping 前与线性 scene color 合成。开关、threshold、knee、intensity、levels 只更新运行时状态。
+- UI/附件新增 Bloom 控制、Near/Far pyramid 手动预览、资源尺寸/bytes/pass 统计。当前五级尺寸为 `338×329 → 169×164 → 84×82 → 42×41 → 21×20`。
+- 真实 OpenGL：Forward ACES 的 Bloom off/on、热力图、Deferred final/overexposure 均获得不同 signature；Near/Far 附件有效且不同，mesh upload 保持 1，无 Shader/FBO 错误。
+- 自动化完整结果 145/145；Bloom 配置、soft threshold、原生 parity 和 UI History 中立性已覆盖。

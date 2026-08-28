@@ -100,7 +100,8 @@ class Mesh3DTests(unittest.TestCase):
     def test_shadow_configuration_contract(self):
         self.assertEqual({value for _, value in ATTACHMENT_MODES},
                          {"normal", "depth", "shadow", "g_position",
-                          "g_normal", "g_albedo", "hdr_scene", "hdr_final"})
+                          "g_normal", "g_albedo", "hdr_scene", "hdr_final",
+                          "bloom_near", "bloom_far"})
         with self.assertRaises(ValueError):
             Pipeline3DConfig(shadow_resolution=128)
         with self.assertRaises(ValueError):
@@ -160,6 +161,12 @@ class Pipeline3DIntegrationTests(unittest.TestCase):
         panel.hdr_exposure_spin.setValue(2.5)
         panel.hdr_debug_combo.setCurrentIndex(
             panel.hdr_debug_combo.findData("heatmap"))
+        panel.bloom_enabled_check.setChecked(True)
+        panel.bloom_threshold_spin.setValue(1.5)
+        panel.bloom_knee_spin.setValue(0.4)
+        panel.bloom_intensity_spin.setValue(1.2)
+        panel.bloom_levels_combo.setCurrentIndex(
+            panel.bloom_levels_combo.findData(4))
         APP.processEvents()
         self.assertAlmostEqual(panel.config.light_x, -2.4)
         self.assertAlmostEqual(panel.config.specular, 0.9)
@@ -171,6 +178,11 @@ class Pipeline3DIntegrationTests(unittest.TestCase):
         self.assertEqual(panel.config.hdr.tone_mapper, "aces")
         self.assertEqual(panel.config.hdr.exposure, 2.5)
         self.assertEqual(panel.config.hdr.debug_view, "heatmap")
+        self.assertTrue(panel.config.bloom_enabled)
+        self.assertEqual(panel.config.bloom_threshold, 1.5)
+        self.assertEqual(panel.config.bloom_knee, 0.4)
+        self.assertEqual(panel.config.bloom_intensity, 1.2)
+        self.assertEqual(panel.config.bloom_levels, 4)
         self.assertEqual(window.canvas.render_revision, runtime_revision)
         self.assertEqual(window.canvas.history_manager.current_index, runtime_history)
         window.close()
