@@ -472,6 +472,37 @@ PyObject* py_bloom_soft_threshold(PyObject*, PyObject* args, PyObject* kwargs) {
     }
 }
 
+PyObject* py_auto_exposure_from_luminance(
+        PyObject*, PyObject* args, PyObject* kwargs) {
+    PyObject* samples = nullptr;
+    int bins = 64;
+    double min_ev = -12.0, max_ev = 4.0, low = 0.02, high = 0.98;
+    double middle = 0.18, compensation = 0.0;
+    static const char* names[] = {"luminances", "bins", "min_ev", "max_ev",
+        "low_percentile", "high_percentile", "middle_grey",
+        "compensation_ev", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|idddddd",
+            const_cast<char**>(names), &samples, &bins, &min_ev, &max_ev,
+            &low, &high, &middle, &compensation)) return nullptr;
+    PyObject* sequence = PySequence_Fast(samples, "luminances must be a sequence");
+    if (!sequence) return nullptr;
+    std::vector<double> values;
+    const Py_ssize_t count = PySequence_Fast_GET_SIZE(sequence);
+    values.reserve(static_cast<std::size_t>(count));
+    for (Py_ssize_t index = 0; index < count; ++index) {
+        const double value = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(sequence, index));
+        if (PyErr_Occurred()) { Py_DECREF(sequence); return nullptr; }
+        values.push_back(value);
+    }
+    Py_DECREF(sequence);
+    try {
+        return PyFloat_FromDouble(vector_engine::auto_exposure_from_luminance(
+            values, bins, min_ev, max_ev, low, high, middle, compensation));
+    } catch (const std::exception& error) {
+        PyErr_SetString(PyExc_ValueError, error.what()); return nullptr;
+    }
+}
+
 PyMethodDef methods[] = {
     {"tessellate_stroke", reinterpret_cast<PyCFunction>(py_tessellate_stroke),
      METH_VARARGS | METH_KEYWORDS, "Tessellate a polyline into 2D triangles."},
@@ -503,6 +534,10 @@ PyMethodDef methods[] = {
      reinterpret_cast<PyCFunction>(py_bloom_soft_threshold),
      METH_VARARGS | METH_KEYWORDS,
      "Select the soft-thresholded HDR contribution used by Bloom."},
+    {"auto_exposure_from_luminance",
+     reinterpret_cast<PyCFunction>(py_auto_exposure_from_luminance),
+     METH_VARARGS | METH_KEYWORDS,
+     "Estimate exposure from percentile-clipped log luminance samples."},
     {nullptr, nullptr, 0, nullptr},
 };
 

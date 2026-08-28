@@ -5,7 +5,7 @@ import os
 import struct
 import time
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import (QMatrix4x4, QOpenGLBuffer, QOpenGLContext,
                          QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat,
                          QOpenGLShader, QOpenGLShaderProgram, QOpenGLVersionProfile,
@@ -18,7 +18,11 @@ from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
                              QVBoxLayout, QWidget)
 
 from core.mesh3d import MESH_VERTEX_STRIDE
-from core.hdr_postprocess import HDR_DEBUG_VIEWS, TONE_MAPPERS
+from core import native_hdr
+from core.hdr_postprocess import (HDR_DEBUG_VIEWS, TONE_MAPPERS,
+                                  adapt_exposure,
+                                  exposure_from_histogram,
+                                  log_luminance_histogram)
 from core.mesh_source import selected_mesh_source
 from core.native_mesh import cube_mesh, extrude_mesh
 from core.native_rasterizer import software_rasterize
@@ -45,6 +49,7 @@ GL_TEXTURE0 = 0x84C0
 GL_TEXTURE_2D = 0x0DE1
 GL_RGBA8 = 0x8058
 GL_RGBA16F = 0x881A
+GL_RGBA = 0x1908
 GL_FRAMEBUFFER = 0x8D40
 GL_COLOR_ATTACHMENT0 = 0x8CE0
 
@@ -391,6 +396,9 @@ class _PipelineGLFunctions:
             "glBindFramebuffer": (None, ctypes.c_uint, ctypes.c_uint),
             "glDrawBuffers": (None, ctypes.c_int,
                               ctypes.POINTER(ctypes.c_uint)),
+            "glReadPixels": (None, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+                             ctypes.c_uint, ctypes.c_void_p),
         }
         for name, signature in specs.items():
             address = context.getProcAddress(name.encode("ascii"))
@@ -437,6 +445,7 @@ class Pipeline3DViewport(QOpenGLWidget):
         self.hdr_target = None
         self.hdr_preview_target = None
         self.bloom_targets = []
+        self.luminance_target = None
         self.shadow_passes = 0
         self.attachment_passes = 0
         self.gbuffer_passes = 0
@@ -444,6 +453,17 @@ class Pipeline3DViewport(QOpenGLWidget):
         self.hdr_passes = 0
         self.hdr_frames = 0
         self.bloom_passes = 0
+        self.auto_histogram = (0,) * 64
+        self.auto_target_exposure = 1.0
+        self.auto_exposure_value = 1.0
+        self.auto_updates = 0
+        self.auto_readback_ms = 0.0
+        self.auto_backend = "not sampled"
+        self._last_histogram_time = 0.0
+        self._last_adaptation_time = time.perf_counter()
+        self.auto_timer = QTimer(self)
+        self.auto_timer.setInterval(33)
+        self.auto_timer.timeout.connect(self.update)
 
     def set_mesh(self, mesh):
         self.mesh = mesh
@@ -452,6 +472,14 @@ class Pipeline3DViewport(QOpenGLWidget):
 
     def set_config(self, config):
         self.config = config
+        if config.auto_exposure:
+            if not self.auto_timer.isActive():
+                self._last_adaptation_time = time.perf_counter()
+                self.auto_timer.start()
+        else:
+            self.auto_timer.stop()
+            self.auto_exposure_value = 1.0
+            self.auto_target_exposure = 1.0
         self.update(); self.state_changed.emit()
 
     def initializeGL(self):
@@ -550,6 +578,7 @@ class Pipeline3DViewport(QOpenGLWidget):
             self.gbuffer_target = None
             self.hdr_target = self.hdr_preview_target = None
             self.bloom_targets = []
+            self.luminance_target = None
             self.upload_pending = True
             self.last_error = ""
         except Exception as error:
@@ -677,6 +706,68 @@ class Pipeline3DViewport(QOpenGLWidget):
         self.functions.glBindTexture(GL_TEXTURE_2D, 0)
         self.quad_buffer.release(); self.quad_vertex_array.release()
         return targets
+
+    def _luminance_target(self):
+        target = self.luminance_target
+        if target is not None and target.isValid():
+            return target
+        format_ = QOpenGLFramebufferObjectFormat()
+        format_.setAttachment(QOpenGLFramebufferObject.NoAttachment)
+        format_.setInternalTextureFormat(GL_RGBA16F)
+        target = QOpenGLFramebufferObject(32, 32, format_)
+        if not target.isValid():
+            raise RuntimeError("无法创建 32x32 luminance reduction target")
+        self.luminance_target = target
+        return target
+
+    def _update_auto_exposure(self, source_target):
+        now = time.perf_counter()
+        delta = min(0.25, max(0.0, now - self._last_adaptation_time))
+        self._last_adaptation_time = now
+        if now - self._last_histogram_time >= 0.1:
+            started = time.perf_counter()
+            target = self._luminance_target()
+            target.bind()
+            self.functions.glViewport(0, 0, 32, 32)
+            self.functions.glDisable(GL_DEPTH_TEST); self.functions.glDisable(GL_CULL_FACE)
+            self.functions.glClearColor(0.0, 0.0, 0.0, 1.0)
+            self.functions.glClear(GL_COLOR_BUFFER_BIT)
+            self.functions.glActiveTexture(GL_TEXTURE0)
+            self.functions.glBindTexture(GL_TEXTURE_2D, source_target.texture())
+            self.quad_vertex_array.bind(); self.quad_buffer.bind()
+            program = self.bloom_program; program.bind()
+            program.setUniformValue("u_source", 0)
+            program.setUniformValue("u_texel", QVector2D(
+                1.0 / source_target.size().width(),
+                1.0 / source_target.size().height()))
+            program.setUniformValue("u_extract", 0)
+            program.setUniformValue("u_threshold", 0.0)
+            program.setUniformValue("u_knee", 0.0)
+            self.functions.glDrawArrays(GL_TRIANGLES, 0, 6)
+            program.release(); self.quad_buffer.release(); self.quad_vertex_array.release()
+            pixels = (ctypes.c_float * (32 * 32 * 4))()
+            self.functions.glReadPixels(
+                0, 0, 32, 32, GL_RGBA, GL_FLOAT,
+                ctypes.cast(pixels, ctypes.c_void_p))
+            target.release(); self.functions.glBindTexture(GL_TEXTURE_2D, 0)
+            luminances = []
+            for offset in range(0, len(pixels), 4):
+                luminances.append(max(0.0,
+                    0.2126 * pixels[offset] + 0.7152 * pixels[offset + 1]
+                    + 0.0722 * pixels[offset + 2]))
+            self.auto_histogram = log_luminance_histogram(luminances, 64)
+            self.auto_target_exposure, self.auto_backend = (
+                native_hdr.auto_exposure_from_luminance(
+                    luminances, bins=64,
+                    compensation_ev=self.config.exposure_compensation,
+                    middle_grey=self.config.middle_grey))
+            self.auto_updates += 1
+            self.auto_readback_ms = (time.perf_counter() - started) * 1000.0
+            self._last_histogram_time = now
+            self.state_changed.emit()
+        self.auto_exposure_value = adapt_exposure(
+            self.auto_exposure_value, self.auto_target_exposure, delta,
+            self.config.brighten_speed, self.config.darken_speed)
 
     def _set_common_uniforms(self, model, view, projection, mode):
         _, _, light_vp = light_matrices(self.config)
@@ -911,7 +1002,10 @@ class Pipeline3DViewport(QOpenGLWidget):
         program.setUniformValue("u_tone_mapper", {
             "linear": 0, "reinhard": 1, "aces": 2,
         }[self.config.hdr.tone_mapper])
-        program.setUniformValue("u_exposure", float(self.config.hdr.exposure))
+        effective_exposure = (self.config.hdr.exposure * self.auto_exposure_value
+                              if self.config.auto_exposure else
+                              self.config.hdr.exposure)
+        program.setUniformValue("u_exposure", float(effective_exposure))
         program.setUniformValue("u_debug_view", {
             "final": 0, "heatmap": 1, "overexposure": 2,
         }[self.config.hdr.debug_view])
@@ -1009,6 +1103,9 @@ class Pipeline3DViewport(QOpenGLWidget):
                 self._render_deferred_lighting(
                     gbuffer, shadow_target, hdr_target)
                 if hdr_target is not None:
+                    if self.config.auto_exposure:
+                        stage = "auto-exposure"
+                        self._update_auto_exposure(hdr_target)
                     if self.config.bloom_enabled:
                         stage = "bloom"
                         self._render_bloom(hdr_target)
@@ -1070,6 +1167,9 @@ class Pipeline3DViewport(QOpenGLWidget):
                 self.functions.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
             if hdr_target is not None:
                 hdr_target.release()
+                if self.config.auto_exposure:
+                    stage = "auto-exposure"
+                    self._update_auto_exposure(hdr_target)
                 if self.config.bloom_enabled:
                     stage = "bloom"
                     self._render_bloom(hdr_target)
@@ -1160,6 +1260,15 @@ class Pipeline3DViewport(QOpenGLWidget):
                                  for target in self.bloom_targets),
             "bloom_bytes": sum(target.size().width() * target.size().height() * 8
                                for target in self.bloom_targets),
+            "auto_exposure": self.config.auto_exposure,
+            "auto_current": self.auto_exposure_value,
+            "auto_target": self.auto_target_exposure,
+            "auto_compensation": self.config.exposure_compensation,
+            "auto_middle_grey": self.config.middle_grey,
+            "auto_histogram": self.auto_histogram,
+            "auto_updates": self.auto_updates,
+            "auto_readback_ms": self.auto_readback_ms,
+            "auto_backend": ("GPU 32x32 reduction + " + self.auto_backend),
             "error": self.last_error or self.mesh.error,
         }
 
@@ -1308,6 +1417,11 @@ class Pipeline3DPanel(QWidget):
         self.bloom_levels_combo = QComboBox()
         for level in range(1, 6):
             self.bloom_levels_combo.addItem(f"{level} levels", level)
+        self.auto_exposure_check = QCheckBox("启用自动曝光（10 Hz 统计）")
+        self.exposure_compensation_spin = self._spin(-4.0, 4.0, 0.0, 0.25, 2)
+        self.middle_grey_spin = self._spin(0.01, 1.0, 0.18, 0.01, 2)
+        self.brighten_speed_spin = self._spin(0.1, 10.0, 3.0, 0.1, 2)
+        self.darken_speed_spin = self._spin(0.1, 10.0, 1.5, 0.1, 2)
         hdr_form.addRow(self.hdr_enabled_check)
         hdr_form.addRow("Tone mapper", self.hdr_tone_combo)
         hdr_form.addRow("Exposure", self.hdr_exposure_spin)
@@ -1317,6 +1431,15 @@ class Pipeline3DPanel(QWidget):
         hdr_form.addRow("Soft knee", self.bloom_knee_spin)
         hdr_form.addRow("Bloom intensity", self.bloom_intensity_spin)
         hdr_form.addRow("Bloom pyramid", self.bloom_levels_combo)
+        hdr_form.addRow(self.auto_exposure_check)
+        hdr_form.addRow("Compensation EV", self.exposure_compensation_spin)
+        hdr_form.addRow("Middle grey", self.middle_grey_spin)
+        hdr_form.addRow("Brighten speed", self.brighten_speed_spin)
+        hdr_form.addRow("Darken speed", self.darken_speed_spin)
+        self.auto_histogram_label = QLabel("Histogram：自动曝光关闭")
+        self.auto_histogram_label.setWordWrap(True)
+        self.auto_histogram_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        hdr_form.addRow(self.auto_histogram_label)
         self.hdr_note = QLabel(
             "Forward/Deferred 共用线性 HDR → Tone Mapping → gamma 2.2；"
             "配置只影响实验 viewport。")
@@ -1452,7 +1575,10 @@ class Pipeline3DPanel(QWidget):
                         self.hdr_tone_combo, self.hdr_exposure_spin,
                         self.hdr_debug_combo, self.bloom_enabled_check,
                         self.bloom_threshold_spin, self.bloom_knee_spin,
-                        self.bloom_intensity_spin, self.bloom_levels_combo):
+                        self.bloom_intensity_spin, self.bloom_levels_combo,
+                        self.auto_exposure_check, self.exposure_compensation_spin,
+                        self.middle_grey_spin, self.brighten_speed_spin,
+                        self.darken_speed_spin):
             signal = (control.toggled if isinstance(control, QCheckBox)
                       else control.currentIndexChanged if isinstance(control, QComboBox)
                       else control.valueChanged)
@@ -1623,7 +1749,12 @@ class Pipeline3DPanel(QWidget):
                 bloom_threshold=self.bloom_threshold_spin.value(),
                 bloom_knee=self.bloom_knee_spin.value(),
                 bloom_intensity=self.bloom_intensity_spin.value(),
-                bloom_levels=self.bloom_levels_combo.currentData())
+                bloom_levels=self.bloom_levels_combo.currentData(),
+                auto_exposure=self.auto_exposure_check.isChecked(),
+                exposure_compensation=self.exposure_compensation_spin.value(),
+                middle_grey=self.middle_grey_spin.value(),
+                brighten_speed=self.brighten_speed_spin.value(),
+                darken_speed=self.darken_speed_spin.value())
         except ValueError as error:
             self.source_warning = str(error); self.refresh(); return
         mesh_changed = (new_config.source_mode != self.config.source_mode or
@@ -1669,7 +1800,9 @@ class Pipeline3DPanel(QWidget):
                     self.hdr_exposure_spin, self.hdr_debug_combo,
                     self.bloom_enabled_check, self.bloom_threshold_spin,
                     self.bloom_knee_spin, self.bloom_intensity_spin,
-                    self.bloom_levels_combo)
+                    self.bloom_levels_combo, self.auto_exposure_check,
+                    self.exposure_compensation_spin, self.middle_grey_spin,
+                    self.brighten_speed_spin, self.darken_speed_spin)
         for control in controls: control.blockSignals(True)
         self.source_combo.setCurrentIndex(self.source_combo.findData(self.config.source_mode))
         self.depth_spin.setValue(self.config.extrusion_depth)
@@ -1707,9 +1840,29 @@ class Pipeline3DPanel(QWidget):
         self.bloom_intensity_spin.setValue(self.config.bloom_intensity)
         self.bloom_levels_combo.setCurrentIndex(
             self.bloom_levels_combo.findData(self.config.bloom_levels))
+        self.auto_exposure_check.setChecked(self.config.auto_exposure)
+        self.exposure_compensation_spin.setValue(self.config.exposure_compensation)
+        self.middle_grey_spin.setValue(self.config.middle_grey)
+        self.brighten_speed_spin.setValue(self.config.brighten_speed)
+        self.darken_speed_spin.setValue(self.config.darken_speed)
         for control in controls: control.blockSignals(False)
         self._updating = False
         mesh = self.viewport.mesh; state = self.viewport.runtime_state()
+        histogram = state["auto_histogram"]
+        peak = max(histogram) if histogram else 0
+        if state["auto_exposure"] and peak > 0:
+            compact = []
+            for start in range(0, len(histogram), 4):
+                value = sum(histogram[start:start + 4])
+                compact.append("▁▂▃▄▅▆▇█"[
+                    min(7, int(round(7.0 * value / max(1, peak * 4))))])
+            self.auto_histogram_label.setText(
+                "Histogram -12..+4 EV：" + "".join(compact) +
+                f"\ncurrent/target {state['auto_current']:.3f}/"
+                f"{state['auto_target']:.3f} · updates {state['auto_updates']} · "
+                f"readback {state['auto_readback_ms']:.3f} ms")
+        else:
+            self.auto_histogram_label.setText("Histogram：自动曝光关闭或尚未采样")
         if self.config.render_path == "forward":
             self.path_note.setText(
                 "Forward：几何与光照在同一 fragment pass；无 G-buffer 读写，"
@@ -1762,5 +1915,9 @@ class Pipeline3DPanel(QWidget):
             f"threshold/knee {state['bloom_threshold']:.2f}/"
             f"{state['bloom_knee']:.2f} · intensity {state['bloom_intensity']:.2f} · "
             f"levels {state['bloom_levels']} · approx "
-            f"{state['bloom_bytes'] / 1048576:.2f} MiB · passes {state['bloom_passes']}"
+            f"{state['bloom_bytes'] / 1048576:.2f} MiB · passes {state['bloom_passes']}\n"
+            f"Auto exposure {'on' if state['auto_exposure'] else 'off'} · "
+            f"current/target {state['auto_current']:.3f}/{state['auto_target']:.3f} · "
+            f"EV comp {state['auto_compensation']:+.2f} · updates "
+            f"{state['auto_updates']} · {state['auto_backend']}"
             f"{warning}{error}")

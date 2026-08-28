@@ -65,4 +65,50 @@ std::array<double, 3> bloom_soft_threshold(
             rgb[2] * contribution};
 }
 
+double auto_exposure_from_luminance(
+        const std::vector<double>& luminances, int bins,
+        double min_ev, double max_ev, double low_percentile,
+        double high_percentile, double middle_grey,
+        double compensation_ev) {
+    if (bins < 2 || bins > 256 || !(min_ev < max_ev) ||
+            low_percentile < 0.0 || low_percentile >= high_percentile ||
+            high_percentile > 1.0 || !std::isfinite(middle_grey) ||
+            middle_grey <= 0.0 || !std::isfinite(compensation_ev)) {
+        throw std::invalid_argument("invalid auto exposure parameters");
+    }
+    std::vector<int> histogram(static_cast<std::size_t>(bins), 0);
+    for (double value : luminances) {
+        if (!std::isfinite(value) || value < 0.0) {
+            throw std::invalid_argument("luminance must be finite and non-negative");
+        }
+        const double ev = std::log2(std::max(value, std::exp2(min_ev)));
+        const double normalized = std::clamp(
+            (ev - min_ev) / (max_ev - min_ev), 0.0, 1.0);
+        const int index = std::min(bins - 1,
+            static_cast<int>(normalized * static_cast<double>(bins)));
+        ++histogram[static_cast<std::size_t>(index)];
+    }
+    const int total = static_cast<int>(luminances.size());
+    if (total == 0) return 1.0;
+    const double low_count = total * low_percentile;
+    const double high_count = total * high_percentile;
+    const double width = (max_ev - min_ev) / bins;
+    double cumulative = 0.0, weighted_ev = 0.0, selected = 0.0;
+    for (int index = 0; index < bins; ++index) {
+        const double start = cumulative;
+        const double end = cumulative + histogram[static_cast<std::size_t>(index)];
+        const double included = std::max(
+            0.0, std::min(end, high_count) - std::max(start, low_count));
+        if (included > 0.0) {
+            weighted_ev += (min_ev + (index + 0.5) * width) * included;
+            selected += included;
+        }
+        cumulative = end;
+    }
+    const double average_ev = selected > 0.0 ? weighted_ev / selected : 0.0;
+    const double target = middle_grey * std::exp2(compensation_ev) /
+        std::max(std::exp2(average_ev), 1e-6);
+    return std::clamp(target, 0.05, 8.0);
+}
+
 }  // namespace vector_engine

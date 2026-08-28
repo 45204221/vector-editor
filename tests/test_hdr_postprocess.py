@@ -12,7 +12,9 @@ if SRC not in sys.path:
 from PyQt5.QtWidgets import QApplication
 from core import native_hdr
 from core.hdr_postprocess import (CanvasHdrConfig, ToneMappingConfig,
-                                  bloom_soft_threshold, linear_to_srgb,
+                                  adapt_exposure, bloom_soft_threshold,
+                                  exposure_from_histogram, linear_to_srgb,
+                                  log_luminance_histogram,
                                   relative_luminance,
                                   srgb_to_linear, tone_map_rgb)
 from ui.main_window import MainWindow
@@ -87,6 +89,27 @@ class HdrToneMappingTests(unittest.TestCase):
         for first, second in zip(actual, expected):
             self.assertAlmostEqual(first, second, places=12)
         self.assertIn(backend, ("C++ native", "Python reference"))
+
+    def test_log_histogram_target_and_temporal_adaptation(self):
+        histogram = log_luminance_histogram([0.18] * 100, bins=64)
+        self.assertEqual(sum(histogram), 100)
+        target = exposure_from_histogram(histogram)
+        self.assertGreater(target, 0.8)
+        self.assertLess(target, 1.3)
+        native_target, backend = native_hdr.auto_exposure_from_luminance(
+            [0.18] * 100, bins=64)
+        self.assertAlmostEqual(native_target, target, places=12)
+        self.assertIn(backend, ("C++ native", "Python reference"))
+        brighter = adapt_exposure(1.0, 4.0, 0.1, 3.0, 1.5)
+        darker = adapt_exposure(4.0, 1.0, 0.1, 3.0, 1.5)
+        self.assertGreater(brighter, 1.0); self.assertLess(brighter, 4.0)
+        self.assertGreater(darker, 1.0); self.assertLess(darker, 4.0)
+        with self.assertRaises(ValueError):
+            log_luminance_histogram([-1.0])
+        with self.assertRaises(ValueError):
+            exposure_from_histogram((0,))
+        with self.assertRaises(ValueError):
+            adapt_exposure(0.0, 1.0, 0.1)
 
     @unittest.skipUnless(native_hdr.is_available(), "native HDR ABI not built")
     def test_cpp_python_parity(self):

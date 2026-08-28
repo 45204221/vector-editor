@@ -56,7 +56,7 @@ def main():
 
     def run_case(index):
         if index >= len(cases):
-            QTimer.singleShot(250, finish)
+            QTimer.singleShot(150, auto_start)
             return
         path, tone, debug, bloom = cases[index]
         panel.render_path_combo.setCurrentIndex(
@@ -69,6 +69,15 @@ def main():
             report[str(cases[index])] = signature(viewport.grabFramebuffer())
             run_case(index + 1)
         QTimer.singleShot(260, capture)
+
+    def auto_start():
+        panel.auto_exposure_check.setChecked(True)
+        panel.exposure_compensation_spin.setValue(-1.0)
+        QTimer.singleShot(900, auto_done)
+
+    def auto_done():
+        report["auto_signature"] = signature(viewport.grabFramebuffer())
+        finish()
 
     def finish():
         scene = viewport.render_attachment("hdr_scene")
@@ -92,6 +101,8 @@ def main():
                 or state["hdr_passes"] < len(cases)
                 or state["bloom_passes"] < state["bloom_levels"]
                 or len(state["bloom_sizes"]) != state["bloom_levels"]
+                or not state["auto_exposure"] or state["auto_updates"] < 2
+                or abs(state["auto_current"] - 1.0) < 0.001
                 or state["error"] or report["attachments"]["scene"] is None
                 or report["attachments"]["bloom_near"] is None
                 or report["attachments"]["bloom_far"] is None

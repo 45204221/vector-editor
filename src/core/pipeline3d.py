@@ -59,6 +59,11 @@ class Pipeline3DConfig:
     bloom_knee: float = 0.5
     bloom_intensity: float = 0.8
     bloom_levels: int = 5
+    auto_exposure: bool = False
+    exposure_compensation: float = 0.0
+    middle_grey: float = 0.18
+    brighten_speed: float = 3.0
+    darken_speed: float = 1.5
 
     def __post_init__(self):
         if self.source_mode not in ("cube", "selection"):
@@ -98,6 +103,12 @@ class Pipeline3DConfig:
             raise ValueError("bloom intensity must be between 0 and 4")
         if self.bloom_levels not in (1, 2, 3, 4, 5):
             raise ValueError("bloom levels must be between 1 and 5")
+        if not -4.0 <= self.exposure_compensation <= 4.0:
+            raise ValueError("exposure compensation must be between -4 and 4 EV")
+        if not 0.01 <= self.middle_grey <= 1.0:
+            raise ValueError("middle grey must be between 0.01 and 1")
+        if self.brighten_speed <= 0.0 or self.darken_speed <= 0.0:
+            raise ValueError("exposure adaptation speeds must be positive")
 
     def changed(self, **changes):
         return replace(self, **changes)

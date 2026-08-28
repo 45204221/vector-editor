@@ -2,7 +2,7 @@
 
 > 文档用途：后续阶段开发的设计依据、执行计划和结果记录  
 > 建立日期：2026-07-27  
-> 当前状态：M21.0–M21.2 已完成；正在实施 M21.3 自动曝光与亮度直方图
+> 当前状态：M21.0–M21.3 已完成；正在实施 M21.4 色彩空间与图片纹理
 
 ## 1. 使用规则
 
@@ -1713,3 +1713,12 @@ C++ 读取固定的 24-byte 顶点格式和 draw command；Python 仍管理 Qt �
 - UI/附件新增 Bloom 控制、Near/Far pyramid 手动预览、资源尺寸/bytes/pass 统计。当前五级尺寸为 `338×329 → 169×164 → 84×82 → 42×41 → 21×20`。
 - 真实 OpenGL：Forward ACES 的 Bloom off/on、热力图、Deferred final/overexposure 均获得不同 signature；Near/Far 附件有效且不同，mesh upload 保持 1，无 Shader/FBO 错误。
 - 自动化完整结果 145/145；Bloom 配置、soft threshold、原生 parity 和 UI History 中立性已覆盖。
+
+#### M21.3 实施回填
+
+- 新增 64-bin `-12..+4 EV` 对数亮度 histogram、2%/98% percentile 裁剪、目标中灰/EV compensation 和非对称指数时间适应的 Python reference；覆盖空输入、非法值和暗亮往返。
+- C++17 新增 `auto_exposure_from_luminance`，使用与 Python 相同的 bin center 和 percentile 部分权重；CPython facade 支持旧 ABI 自动回退，固定样本达到双精度 parity。
+- GPU 每 100 ms 把线性 HDR scene 以 9-tap 缩减到 `32×32 RGBA16F`，只读取 1024 个 float pixels，不读取完整 framebuffer；C++ 根据 Rec.709 luminance 计算目标 exposure，约 30 FPS timer 只负责平滑适应。
+- UI 增加自动/固定曝光、compensation、middle grey、明/暗适应速度和 16 列压缩直方图；状态明确报告 current/target、更新次数、readback ms 和真实 backend。
+- 真实 OpenGL：-1 EV compensation 下目标曝光约 `0.3987`，当前值由 1.0 连续收敛到约 `0.554`；900 ms 内完成 7 次统计，最近一次 32² float readback 约 1.33 ms，最终 signature 随曝光变化，mesh upload 保持 1。
+- 完整自动化 146/146；真实 smoke 报告 `GPU 32x32 reduction + C++ native`，无 GL/Qt 事件循环错误。
