@@ -10,6 +10,8 @@ from .lighting_panel import LightingPanel
 from .pipeline3d_panel import Pipeline3DPanel
 from .texture_sampling_panel import TextureSamplingPanel
 from .sdf_panel import SdfPanel
+from .workspace_settings import (persistence_enabled, restore_window, save_window,
+                                 settings)
 
 
 class EngineLabWindow(QMainWindow):
@@ -64,6 +66,12 @@ class EngineLabWindow(QMainWindow):
         self.pages.addTab(self.sdf_panel, "SDF 距离场")
         self.pages.currentChanged.connect(self._refresh_current_page)
         self.setCentralWidget(central)
+        restore_window(self, "workspace/engine_lab_geometry")
+        try:
+            saved_page = (int(settings().value("workspace/engine_lab_page", 0))
+                          if persistence_enabled() else 0)
+        except (TypeError, ValueError): saved_page = 0
+        self.pages.setCurrentIndex(max(0, min(self.pages.count() - 1, saved_page)))
 
     def show_page(self, page="pipeline"):
         index = {
@@ -101,5 +109,8 @@ class EngineLabWindow(QMainWindow):
 
     def closeEvent(self, event):
         # Preserve selected tabs, previews and sampling state between openings.
+        save_window(self, "workspace/engine_lab_geometry")
+        if persistence_enabled():
+            settings().setValue("workspace/engine_lab_page", self.pages.currentIndex())
         event.ignore()
         self.hide()

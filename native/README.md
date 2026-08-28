@@ -1,6 +1,9 @@
-# Vector Engine Native Geometry
+# Vector Engine Native Kernels
 
-This directory contains the optional C++17 geometry kernel used by the editor.
+This directory contains the optional C++17 algorithm kernels used by the editor:
+stroke/coverage tessellation, continuous arc-length dashes, visibility,
+mesh extrusion, software rasterization, texture mip/filter references,
+HDR statistics/tone mapping, and exact Euclidean signed-distance fields.
 It does not own Qt objects, OpenGL contexts, document shapes, or GPU resources.
 
 ## Build on the configured Windows development machine

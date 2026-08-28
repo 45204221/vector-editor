@@ -29,6 +29,7 @@ def main():
     # 设置应用程序信息
     app.setApplicationName("矢量图形编辑器")
     app.setApplicationVersion("1.0.0")
+    app.setOrganizationName("VectorEditorDemo")
 
     # 设置样式
     app.setStyle("Fusion")

@@ -2,7 +2,7 @@
 
 > 文档用途：后续阶段开发的设计依据、执行计划和结果记录  
 > 建立日期：2026-07-27  
-> 当前状态：M21.0–M21.5 已完成；正在实施 M21.6 性能与旧遗留闭环
+> 当前状态：M21 综合实施已完成；进入集中自动化验证与 GUI 验收
 
 ## 1. 使用规则
 
@@ -1740,3 +1740,19 @@ C++ 读取固定的 24-byte 顶点格式和 draw command；Python 仍管理 Qt �
 - OpenGL 同屏左侧绘制 bitmap coverage、右侧绘制 SDF；Shader 使用 signed threshold、`fwidth`/`smoothstep` 抗锯齿，并提供描边、指数发光、二值 mask、signed distance 和等值线视图。0.25×..8× 缩放、描边与发光仅更新 uniform，源或 range 改变才重建。
 - 真实 OpenGL smoke 中 final/mask/distance/contours/0.25×/8× 六种 case 均得到不同 framebuffer signature；rebuild 保持 1、纹理上传保持 2，backend 为 `C++ native exact EDT`，无 Shader/GL 错误。
 - 初次动态字形生成时间包含 Qt 字体引擎冷启动并在界面如实显示；当前单资源方案无需 Atlas/LRU，若未来扩展多 glyph 缓存再引入有界 LRU。
+
+#### M21.6 实施回填
+
+- C++17/Python 新增连续弧长 dash segmentation。Dash、Dot、DashDot 的 pattern 以线宽为尺度，沿完整 polyline/闭环累计相位，不在每段或连接线路由拐角处重启；GeometryCompiler 将 on-segment 输出为 GPU `LINES`，关闭或 SolidLine 时保持原路径。
+- Golden case 覆盖 `10+10` 的直角折线并验证拐角相位延续；原生/Python 达到双精度 parity。100/1000 条三段折线基准分别为 Python `0.652/6.552 ms`、C++ `0.157/1.402 ms`，约 `4.15×/4.67×`，输出 `2000/20000` vertices（float32 xy 为 16/160 KiB）。
+- 主画布已有 `_GpuTimerQueryPool`，使用 4-slot 非阻塞 `GL_TIME_ELAPSED` ring；query 不可用时 profiler 元数据显示 unavailable，CPU draw time 不冒充 GPU time。本轮未把同一 query 对象跨 OpenGL context 共享。
+- Indexed stroke 未切换：coverage triangle ABI 中 position/coverage 的逐角属性以及 dash 的最小 endpoint stream 尚无端到端 ≥25% 上传收益证据。MultiDraw 未切换：PyQt 函数表和跨驱动 command bucket 尚无稳定矩阵。两项按阶段门槛明确 defer，而不是制造不可验证优化。
+- 新增 `benchmarks/benchmark_dash_pipeline.py` 固化 100/1000 规模、上传字节和决策理由，后续只有获得完整视觉 parity 与驱动证据才重启上述优化。
+
+#### M21.7 实施回填
+
+- 主窗口与引擎实验室使用 `QSettings` 保存窗口 geometry；主窗口额外保存 Dock state，实验室保存最后分页。恢复后检查所有屏幕 available geometry，不可见窗口自动按主屏夹紧并居中。
+- offscreen 自动化禁用注册表持久化，避免测试污染用户工作区；损坏或类型错误的设置安全忽略。仅保存 UI geometry/state/page，不保存 GPU handle、图片绝对路径、实验资源或瞬时统计。
+- SDF 距离场加入引擎实验室分页和“引擎展示”菜单，保持基础编辑器仅有属性/图层两个 Dock；实验功能继续使用可滚动分页布局。
+- README 已按当前实现重写：明确项目定位、算法功能、架构/数据流、C++/OpenGL 边界、构建、测试、真实 smoke、性能基准与已知限制；原生说明同步覆盖全部 C++ kernels。
+- M21 集中验收采用完整 unittest、3D HDR/texture/SDF 真实 OpenGL smoke、原生重建和 `git diff --check`。人工 GUI 验收仍由用户在最终集中交付后执行。
