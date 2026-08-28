@@ -2,7 +2,7 @@
 
 > 文档用途：后续阶段开发的设计依据、执行计划和结果记录  
 > 建立日期：2026-07-27  
-> 当前状态：M21.0–M21.4 已完成；正在实施 M21.5 C++ 距离场与 OpenGL SDF
+> 当前状态：M21.0–M21.5 已完成；正在实施 M21.6 性能与旧遗留闭环
 
 ## 1. 使用规则
 
@@ -1731,3 +1731,12 @@ C++ 读取固定的 24-byte 顶点格式和 draw command；Python 仍管理 Qt �
 - OpenGL context 探测 S3TC/BC1/BC3 扩展并明确报告能力。本阶段不实现通用 DDS 容器和直接压缩上传：有扩展时标注“能力可用但未启用 DDS 直传”，无扩展时明确回退 RGBA8，避免将驱动能力误报为功能实现。
 - 真实 OpenGL 使用程序生成的 `96×64` 渐变源验证三种色彩解释，得到三个不同 framebuffer signature；最终内部格式为 `GL_SRGB8_ALPHA8`，切换发生 4 次受控上传，动画阶段 upload 计数保持 4，无资源抖动或错误。
 - 语法、纹理数学、原生 parity 与 UI 工作区定向测试 17/17 通过；M21.4 完成后进入距离场阶段。
+
+#### M21.5 实施回填
+
+- Python/C++17 均实现 Felzenszwalb–Huttenlocher 一维下包络算法，并通过横向、纵向各一次变换得到精确二维欧氏距离；内外两次距离之差定义为“图形内正、图形外负”的 signed field。
+- 原生模块新增 R8 mask 接口与自动 Python fallback；单点 `3×3` golden case 验证轴向距离 1、对角距离 `√2`，`9×9` 圆形样本达到双精度 C++/Python parity，非法尺寸和 range 安全拒绝。
+- 引擎实验室增加“SDF 距离场”页，不进入主窗口 Dock、不修改 Shape/Canvas/Serializer。源支持 Qt 动态字形 G、圆形和星形；默认生成单张 `128×128` 场并以可移植 RGBA8 归一编码上传。
+- OpenGL 同屏左侧绘制 bitmap coverage、右侧绘制 SDF；Shader 使用 signed threshold、`fwidth`/`smoothstep` 抗锯齿，并提供描边、指数发光、二值 mask、signed distance 和等值线视图。0.25×..8× 缩放、描边与发光仅更新 uniform，源或 range 改变才重建。
+- 真实 OpenGL smoke 中 final/mask/distance/contours/0.25×/8× 六种 case 均得到不同 framebuffer signature；rebuild 保持 1、纹理上传保持 2，backend 为 `C++ native exact EDT`，无 Shader/GL 错误。
+- 初次动态字形生成时间包含 Qt 字体引擎冷启动并在界面如实显示；当前单资源方案无需 Atlas/LRU，若未来扩展多 glyph 缓存再引入有界 LRU。

@@ -14,6 +14,7 @@ add_library(vector_engine_native MODULE
     src/software_rasterizer.cpp
     src/texture_sampling.cpp
     src/tone_mapping.cpp
+    src/distance_field.cpp
     python_bindings/module.cpp
 )
 target_include_directories(vector_engine_native PRIVATE include)

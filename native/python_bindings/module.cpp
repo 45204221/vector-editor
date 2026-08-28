@@ -10,6 +10,7 @@
 #include "software_rasterizer.hpp"
 #include "texture_sampling.hpp"
 #include "tone_mapping.hpp"
+#include "distance_field.hpp"
 
 namespace {
 
@@ -517,6 +518,24 @@ PyObject* py_auto_exposure_from_luminance(
     }
 }
 
+PyObject* py_signed_distance_field(PyObject*, PyObject* args) {
+    PyObject* mask_object = nullptr;
+    int width = 0, height = 0;
+    if (!PyArg_ParseTuple(args, "Oii", &mask_object, &width, &height)) return nullptr;
+    std::vector<std::uint8_t> mask;
+    if (!parse_rgba_buffer(mask_object, mask)) return nullptr;
+    try {
+        const auto values = vector_engine::signed_distance_field(mask, width, height);
+        PyObject* result = PyTuple_New(static_cast<Py_ssize_t>(values.size()));
+        if (!result) return nullptr;
+        for (Py_ssize_t index = 0; index < static_cast<Py_ssize_t>(values.size()); ++index)
+            PyTuple_SET_ITEM(result, index, PyFloat_FromDouble(values[static_cast<std::size_t>(index)]));
+        return result;
+    } catch (const std::exception& error) {
+        PyErr_SetString(PyExc_ValueError, error.what()); return nullptr;
+    }
+}
+
 PyMethodDef methods[] = {
     {"tessellate_stroke", reinterpret_cast<PyCFunction>(py_tessellate_stroke),
      METH_VARARGS | METH_KEYWORDS, "Tessellate a polyline into 2D triangles."},
@@ -554,6 +573,8 @@ PyMethodDef methods[] = {
      reinterpret_cast<PyCFunction>(py_auto_exposure_from_luminance),
      METH_VARARGS | METH_KEYWORDS,
      "Estimate exposure from percentile-clipped log luminance samples."},
+    {"signed_distance_field", py_signed_distance_field, METH_VARARGS,
+     "Compute an exact Euclidean signed distance field from an R8 mask."},
     {nullptr, nullptr, 0, nullptr},
 };
 
