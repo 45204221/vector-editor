@@ -9,6 +9,9 @@ from .instancing_panel import InstancingPanel
 from .lighting_panel import LightingPanel
 from .pipeline3d_panel import Pipeline3DPanel
 from .texture_sampling_panel import TextureSamplingPanel
+from .sdf_panel import SdfPanel
+from .workspace_settings import (persistence_enabled, restore_window, save_window,
+                                 settings)
 
 
 class EngineLabWindow(QMainWindow):
@@ -20,6 +23,7 @@ class EngineLabWindow(QMainWindow):
     LIGHTING_PAGE = 3
     PIPELINE3D_PAGE = 4
     TEXTURE_SAMPLING_PAGE = 5
+    SDF_PAGE = 6
 
     def __init__(self, canvas, graphics_view, parent=None):
         super().__init__(parent, Qt.Window)
@@ -52,14 +56,22 @@ class EngineLabWindow(QMainWindow):
         self.lighting_panel = LightingPanel(graphics_view)
         self.pipeline3d_panel = Pipeline3DPanel(canvas)
         self.texture_sampling_panel = TextureSamplingPanel(canvas)
+        self.sdf_panel = SdfPanel(canvas)
         self.pages.addTab(self.pipeline_panel, "渲染管线")
         self.pages.addTab(self.performance_panel, "性能分析")
         self.pages.addTab(self.instancing_panel, "Atlas/实例化")
         self.pages.addTab(self.lighting_panel, "2D 光照/阴影")
         self.pages.addTab(self.pipeline3d_panel, "3D 渲染管线")
         self.pages.addTab(self.texture_sampling_panel, "纹理采样/LOD")
+        self.pages.addTab(self.sdf_panel, "SDF 距离场")
         self.pages.currentChanged.connect(self._refresh_current_page)
         self.setCentralWidget(central)
+        restore_window(self, "workspace/engine_lab_geometry")
+        try:
+            saved_page = (int(settings().value("workspace/engine_lab_page", 0))
+                          if persistence_enabled() else 0)
+        except (TypeError, ValueError): saved_page = 0
+        self.pages.setCurrentIndex(max(0, min(self.pages.count() - 1, saved_page)))
 
     def show_page(self, page="pipeline"):
         index = {
@@ -69,6 +81,7 @@ class EngineLabWindow(QMainWindow):
             "lighting": self.LIGHTING_PAGE,
             "pipeline3d": self.PIPELINE3D_PAGE,
             "texture_sampling": self.TEXTURE_SAMPLING_PAGE,
+            "sdf": self.SDF_PAGE,
         }.get(page)
         if index is None:
             raise ValueError(f"Unknown engine lab page: {page}")
@@ -91,8 +104,13 @@ class EngineLabWindow(QMainWindow):
             self.pipeline3d_panel.refresh()
         elif index == self.TEXTURE_SAMPLING_PAGE:
             self.texture_sampling_panel.refresh()
+        elif index == self.SDF_PAGE:
+            self.sdf_panel.refresh()
 
     def closeEvent(self, event):
         # Preserve selected tabs, previews and sampling state between openings.
+        save_window(self, "workspace/engine_lab_geometry")
+        if persistence_enabled():
+            settings().setValue("workspace/engine_lab_page", self.pages.currentIndex())
         event.ignore()
         self.hide()

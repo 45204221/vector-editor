@@ -26,7 +26,8 @@ struct TextureFootprint {
 };
 
 std::vector<TextureLevel> generate_mipmaps(
-    const std::vector<std::uint8_t>& rgba, int width, int height);
+    const std::vector<std::uint8_t>& rgba, int width, int height,
+    bool srgb_linear = false);
 
 std::array<std::uint8_t, 4> sample_mipmaps(
     const std::vector<TextureLevel>& levels, double u, double v, double lod,

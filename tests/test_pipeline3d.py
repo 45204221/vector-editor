@@ -18,6 +18,7 @@ from core import native_mesh
 from core.pipeline3d import (ATTACHMENT_MODES, Pipeline3DConfig,
                              blinn_phong_components, light_matrices,
                              scene_lights, trace_pipeline_vertex)
+from core.hdr_postprocess import ToneMappingConfig
 from ui.main_window import MainWindow
 
 
@@ -99,7 +100,8 @@ class Mesh3DTests(unittest.TestCase):
     def test_shadow_configuration_contract(self):
         self.assertEqual({value for _, value in ATTACHMENT_MODES},
                          {"normal", "depth", "shadow", "g_position",
-                          "g_normal", "g_albedo"})
+                          "g_normal", "g_albedo", "hdr_scene", "hdr_final",
+                          "bloom_near", "bloom_far"})
         with self.assertRaises(ValueError):
             Pipeline3DConfig(shadow_resolution=128)
         with self.assertRaises(ValueError):
@@ -114,6 +116,17 @@ class Mesh3DTests(unittest.TestCase):
         self.assertEqual(len(lights), 8)
         self.assertEqual(lights[0][0], (2.8, 4.2, 3.0))
         self.assertEqual(len(set(color for _, color in lights)), 8)
+
+    def test_pipeline_uses_shared_hdr_contract(self):
+        config = Pipeline3DConfig()
+        self.assertIsInstance(config.hdr, ToneMappingConfig)
+        changed = config.changed(hdr=config.hdr.changed(
+            True, "aces", 2.0, "heatmap"))
+        self.assertTrue(changed.hdr.enabled)
+        self.assertEqual(changed.hdr.tone_mapper, "aces")
+        self.assertEqual(config.hdr.enabled, False)
+        with self.assertRaises(TypeError):
+            Pipeline3DConfig(hdr={"enabled": True})
 
 
 class Pipeline3DIntegrationTests(unittest.TestCase):
@@ -142,6 +155,21 @@ class Pipeline3DIntegrationTests(unittest.TestCase):
             panel.render_path_combo.findData("deferred"))
         panel.light_count_combo.setCurrentIndex(
             panel.light_count_combo.findData(8))
+        panel.hdr_enabled_check.setChecked(True)
+        panel.hdr_tone_combo.setCurrentIndex(
+            panel.hdr_tone_combo.findData("aces"))
+        panel.hdr_exposure_spin.setValue(2.5)
+        panel.hdr_debug_combo.setCurrentIndex(
+            panel.hdr_debug_combo.findData("heatmap"))
+        panel.bloom_enabled_check.setChecked(True)
+        panel.bloom_threshold_spin.setValue(1.5)
+        panel.bloom_knee_spin.setValue(0.4)
+        panel.bloom_intensity_spin.setValue(1.2)
+        panel.bloom_levels_combo.setCurrentIndex(
+            panel.bloom_levels_combo.findData(4))
+        panel.auto_exposure_check.setChecked(True)
+        panel.exposure_compensation_spin.setValue(1.0)
+        panel.middle_grey_spin.setValue(0.22)
         APP.processEvents()
         self.assertAlmostEqual(panel.config.light_x, -2.4)
         self.assertAlmostEqual(panel.config.specular, 0.9)
@@ -149,6 +177,18 @@ class Pipeline3DIntegrationTests(unittest.TestCase):
         self.assertEqual(panel.config.pcf_radius, 2)
         self.assertEqual(panel.config.render_path, "deferred")
         self.assertEqual(panel.config.light_count, 8)
+        self.assertTrue(panel.config.hdr.enabled)
+        self.assertEqual(panel.config.hdr.tone_mapper, "aces")
+        self.assertEqual(panel.config.hdr.exposure, 2.5)
+        self.assertEqual(panel.config.hdr.debug_view, "heatmap")
+        self.assertTrue(panel.config.bloom_enabled)
+        self.assertEqual(panel.config.bloom_threshold, 1.5)
+        self.assertEqual(panel.config.bloom_knee, 0.4)
+        self.assertEqual(panel.config.bloom_intensity, 1.2)
+        self.assertEqual(panel.config.bloom_levels, 4)
+        self.assertTrue(panel.config.auto_exposure)
+        self.assertEqual(panel.config.exposure_compensation, 1.0)
+        self.assertEqual(panel.config.middle_grey, 0.22)
         self.assertEqual(window.canvas.render_revision, runtime_revision)
         self.assertEqual(window.canvas.history_manager.current_index, runtime_history)
         window.close()

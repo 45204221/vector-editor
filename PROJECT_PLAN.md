@@ -2,7 +2,7 @@
 
 > 文档用途：后续阶段开发的设计依据、执行计划和结果记录  
 > 建立日期：2026-07-27  
-> 当前状态：M17.1 3D Viewport、二维挤出与管线追踪——实现完成，待 GUI 验收
+> 当前状态：M21 综合实施已完成；进入集中自动化验证与 GUI 验收
 
 ## 1. 使用规则
 
@@ -131,11 +131,13 @@ flowchart LR
 | 双窗口分页架构 | 完成 | 主窗口保留基础编辑；独立引擎实验室分页承载管线、Shader、离屏与性能；GUI 验收通过 |
 | M15.1 纹理图集与 GPU 实例化 | 完成 | 程序化 Atlas、per-instance buffer、单 draw 精灵/粒子实验；自动化、真实 OpenGL 与 GUI 验收通过 |
 | M15.2 动态字形 Atlas 与 GPU 文本批处理 | 完成 | Qt 字体度量/栅格化、共享 glyph texture、连续文字命令 GPU batching 与安全回退；自动化、真实 OpenGL 与 GUI 验收通过 |
-| M15 纹理、文字与实例化 | 后移 | 字形/图片 atlas、GPU 文本批处理、instancing/粒子实验 |
+| M15 纹理、文字与实例化 | 完成 | 程序化/字形 Atlas、GPU 文本批处理与实例化实验 |
 | M16 C++ 2D 可见性与 OpenGL 光照/阴影 | 已完成 | C++ 可见性、多光源 Shadow Mask/Light Texture、加法累积、缓存与三后端恢复均通过自动化、真实 OpenGL 和用户 GUI 验收 |
-| M17 3D 渲染管线实验室 | M17.1 待 GUI 验收 | 独立 3D viewport、C++ 二维挤出、轨道相机、MVP/depth/culling/wireframe 与顶点阶段追踪已完成 |
-| M18 C++ 软件光栅器与 OpenGL 管线对照 | 进行中 | M18.1 原生边函数/重心/深度/透视校正与 CPU/OpenGL 页面已实现，待 GUI 验收；M18.2 计划差异热图与误差指标 |
-| M19 C++ 距离场与 OpenGL SDF 渲染 | 后移候选 | 距离变换、SDF 文字/轮廓、缩放抗锯齿与描边/发光效果；待高可视管线阶段完成后再评估 |
+| M17 3D 渲染管线实验室 | 完成 | 3D viewport、C++ 挤出、Blinn-Phong、Shadow Map、G-buffer、Forward/Deferred 与多光源对照 |
+| M18 C++ 软件光栅器与 OpenGL 管线对照 | 完成 | 齐次裁剪、Top-left、1×/4× MSAA、CPU/GPU 附件、热图、误差与像素探针 |
+| M19 纹理采样与各向异性过滤 | 完成 | Mip/LOD、导数 Footprint、1–8 taps 手写各向异性过滤及 C++/Python/OpenGL 对照 |
+| M20.1 主画布 HDR 后处理 | 已实现 | RGBA16F、曝光、Linear/Reinhard/ACES、亮度热力图和过曝遮罩；进入综合阶段基线 |
+| M21 综合图形管线收束 | 计划中 | 共享 HDR、Bloom、自动曝光/直方图、色彩管理/图片纹理、SDF 及有依据的遗留优化 |
 
 ## 6. 当前阶段：M8 按图元管理的 GPU Slot/Arena
 
@@ -1554,3 +1556,203 @@ C++ 读取固定的 24-byte 顶点格式和 draw command；Python 仍管理 Qt �
 - GUI 验收重点：切换到实验性 OpenGL 后端，在画布绘制重叠亮色图元；使用 screen-gradient + additive、exposure 约 `3.0`，依次观察 Linear 高光截断、Reinhard/ACES 细节差异、热力图和红色过曝遮罩；确认文字/网格/选择框清晰，窗口 resize、拖动/撤销、关闭 HDR 和后端切换均正常。
 - 下一步：GUI 验收通过后合并 M20.1。后续优先讨论是否把同一共享 Tone Mapping 配置复用到 3D viewport；Bloom、自动曝光和直方图继续保持后移，不与本切片捆绑。
 - GUI 验收重点：比较三种 Filter 在远端的摩尔纹与模糊；开启动画观察 shimmer；切换 Mip-color/LOD heatmap；提高 tiling；固定 L0 与 L6/L7；修改 CPU probe 并确认 C++/Python 差值为零、上传计数不随动画增长。
+
+### 2026-08-28 / M21 综合图形管线收束阶段（临时计划）
+
+#### 状态与执行方式
+
+- 状态：连续实施中；M21.0 基线与共享契约、M21.1 3D HDR 已完成，进入 M21.2。
+- 工作基线：以包含 M19.2 和 M20.1 的 `feature/m20-canvas-hdr` 为功能基线；单独使用综合开发分支，不依赖远程仓库状态。
+- 本轮目标：最大限度集中完成此前已经明确记录、且能强化“可视、可用、可讲”定位的未实现功能；不在每个内部切片后等待 GUI 验收或远程合并，全部切片完成后再统一交付。
+- “一次完成”不等于一次巨型提交。实现按下列依赖顺序连续推进，每个切片必须通过定向测试、完整自动化和短时真实 OpenGL smoke 才能进入下一切片，并保留独立可回滚提交。
+- GUI 验收和远程管理暂不作为本轮内部阻塞条件；Qt offscreen、真实 context、framebuffer signature、资源计数与错误注入承担中间验证职责。
+
+#### 统一范围
+
+本轮承诺实现：
+
+1. 主画布与 3D viewport 共享的 HDR/Tone Mapping 数学契约；
+2. 3D Forward/Deferred 输出进入 RGBA16F、曝光和 Linear/Reinhard/ACES 管线；
+3. Bloom 高亮提取、降采样/模糊/上采样和最终合成；
+4. 自动曝光、亮度统计、直方图和时间适应；
+5. 线性/sRGB 色彩空间边界、图片纹理导入与可视化对照；
+6. C++ 距离变换、OpenGL SDF 文字/轮廓及 bitmap/SDF 缩放对照；
+7. 异步 GPU timer query、GPU 虚线以及有量化收益的描边/批次优化；
+8. 工作区状态跨会话保存/恢复及本轮新增页面的信息架构整理。
+
+尽力实现但允许按能力安全降级：
+
+- BC1/BC3 压缩纹理：支持桌面驱动扩展时读取受限 DDS 并直接上传；不支持时显示能力与 RGBA8 回退，不自行实现完整通用纹理容器生态。
+- 索引化描边与 MultiDraw：只有基准证明顶点/提交成本明显下降且 PyQt OpenGL 函数表稳定时启用；否则保留实现研究记录和现有 Arena 路径，不制造不可维护的伪优化。
+- GPU 直方图：OpenGL 4.3+ 可使用 compute/SSBO；较低能力使用亮度降采样加小尺寸异步 readback，界面必须标明实际 backend。
+
+本轮明确不扩张：完整 PBR/IBL、骨骼动画、通用材质编辑器、完整 C++/Qt Renderer 重写、复杂文字排版系统、通用 DDS/KTX 编解码器。这些不是此前已确认的缺失闭环，加入会破坏本轮可验证性。
+
+#### M21.0 基线冻结与共享契约
+
+- 运行 M20.1 的原生构建、完整测试和现有 OpenGL smoke，记录测试数、OpenGL 版本、主要附件尺寸和显存估算。
+- 抽取无 Qt/GL 的 `ToneMappingConfig`、颜色空间转换和亮度统计契约；Canvas HDR 与 3D viewport 共享数值定义，但各 context 独立持有 GPU 资源。
+- 统一线性颜色约定：光照、Bloom、自动曝光均在线性空间执行；Tone Mapping 后才进行线性到 sRGB/gamma 输出转换。
+- 不让共享配置进入 Canvas、Shape、Serializer 或 History；实验窗口关闭/重开只恢复运行时设置。
+
+完成门槛：M20.1 行为、输出签名和 141 项基线测试不退化；C++/Python/Shader 固定输入公式一致。
+
+#### M21.1 3D HDR 与共享 Tone Mapping
+
+- 将 Forward 与 Deferred 最终颜色写入 viewport-size RGBA16F HDR target，继续复用现有 Shadow Map 与 G-buffer，不改变 mesh ABI。
+- 复用 Linear、Reinhard、ACES、exposure、亮度热力图和过曝遮罩；增加 LDR/HDR/最终输出三附件预览。
+- Forward/Deferred 使用同一相机、光源、材质、曝光和算子配置，以便比较渲染路径而不是比较不同后处理参数。
+- Shader/FBO 创建失败只降级当前 3D HDR pass，不影响主编辑器或 Canvas OpenGL 后端。
+
+完成门槛：Forward/Deferred 在三种算子下产生可区分且稳定的 framebuffer signature；mesh upload 不随曝光变化增加；History 与二维文档 revision 不变。
+
+#### M21.2 Bloom 多级后处理
+
+- 管线固定为 `HDR scene → bright-pass → 1/2..1/32 pyramid → separable blur/dual-filter upsample → HDR composite → Tone Mapping`。
+- 高亮阈值、soft knee、强度和层数为运行时参数；默认最多 5 层，窗口隐藏时不持续渲染。
+- C++/Python 提供高亮权重与 Gaussian/dual-filter 权重 reference；OpenGL 承担实际多 pass。
+- 实验页可查看 Bright、各级 Bloom mip、仅 Bloom 和最终 Composite，并显示 pass 数、纹理尺寸、估算带宽与耗时。
+
+资源上限：1080p 下新增 Bloom 颜色金字塔目标控制在约 8 MiB 量级；只为活动 viewport 保留资源，resize 延迟重建，失败时关闭 Bloom 并保持 HDR 基线。
+
+完成门槛：阈值、层数和强度改变只更新后处理状态；黑场无伪光晕；高亮场景存在稳定扩散；关闭 Bloom 与 M21.1 输出一致。
+
+#### M21.3 自动曝光与亮度直方图
+
+- 在线性 HDR 场景上计算对数亮度，提供平均亮度、百分位裁剪、目标中灰和 exposure compensation。
+- 首选 GPU 亮度归约/256-bin histogram；能力不足时使用小尺寸降采样附件和有界异步 CPU readback，禁止每帧读取完整 framebuffer。
+- 曝光使用明暗分离的指数时间适应，支持固定曝光/自动曝光切换、冻结和重置。
+- 页面展示直方图、当前/目标 EV、平均/百分位亮度、adaptation 曲线和实际计算 backend。
+- C++/Python reference 覆盖 histogram bin、百分位、EV 与时间适应 golden cases。
+
+性能上限：统计频率默认 10 Hz，直方图最多 256 bins；停用或页面隐藏后不保留 timer/readback 队列。
+
+完成门槛：暗→亮与亮→暗变化连续且无闪烁；固定曝光严格复现 M21.2；GPU/回退统计误差在预定容差内；异常不会退出 Qt 事件循环。
+
+#### M21.4 色彩空间、图片纹理与压缩能力
+
+- 使用 Qt/Pillow 读取常见 PNG/JPEG 为受控 RGBA8 数据；显示尺寸、通道、来源色彩假设和显存预算。图片仅进入实验资源，不写入二维文档格式。
+- 增加 Linear/sRGB 输入解释和 `GL_SRGB8_ALPHA8` 路径，展示“错误 gamma 采样”与“正确线性过滤/光照”的并排结果。
+- Mip 生成分别提供错误 gamma box 与线性空间 box reference，C++/Python 对同一输入进行 parity。
+- 保留 M19 的 Nearest/Bilinear/Trilinear/anisotropic、LOD/footprint 调试；图片纹理复用同一采样实验，而不是新建重复页面。
+- 可选实现受限 DDS BC1/BC3 上传与能力报告；格式、尺寸或扩展不支持时回退解码后的 RGBA8 或拒绝并显示可解释错误。
+
+安全限制：输入最大 4096×4096，读取前检查文件大小和像素预算；不下载网络资源，不把绝对文件路径写入保存文档。
+
+完成门槛：程序纹理旧结果不变；sRGB/linear 对照可见；图片 resize/切换不泄漏 texture；非法/超限图片安全拒绝。
+
+#### M21.5 C++ 距离场与 OpenGL SDF
+
+- C++17 实现二值 mask 的精确或确定性近似欧氏距离变换，并由内外距离生成 signed distance；Python 保留小尺寸 reference。
+- 输入来源支持动态字形 Atlas glyph 和程序化/选中图元 mask；首轮不修改 Shape schema。
+- OpenGL Shader 展示阈值填充、`smoothstep/fwidth` 抗锯齿、描边、阴影与发光；同屏比较 bitmap 与 SDF 在 0.25×..8× 缩放下的边缘稳定性。
+- 可视化 mask、inside/outside distance、signed field、阈值等值线和最终效果；显示生成耗时、纹理格式、range 与重建次数。
+- SDF 只在源 glyph/mask 或 range 改变时重建；缩放、颜色和描边只更新 uniform。
+
+资源上限：默认单个 512² R16F/R8 field；Atlas 模式有界缓存并采用 LRU，禁止为全部 Unicode 预生成距离场。
+
+完成门槛：已知几何距离 golden case、C++/Python 容差 parity、缩放下边缘连续、缓存命中正确、原 GPU 字形路径可随时回退。
+
+#### M21.6 性能与旧遗留闭环
+
+- 增加不阻塞 CPU 的 GPU timestamp query ring，分别测量 3D scene、Bloom、exposure、Tone Mapping 和 SDF pass；无 query 能力时明确显示 unavailable，不以 CPU 时间冒充 GPU 时间。
+- 为 dash/dot 样式建立 C++ 弧长分段与 GPU triangle coverage 路径，使虚线在缩放、join/cap 和连接线中保持一致。
+- 对非索引描边进行数据基准；只有顶点/上传字节至少下降约 25% 且完整视觉 parity 成立时切换到 indexed mesh。
+- 对 Arena draw command 做连续 bucket/page 合并；只有驱动/API 支持且基准显示提交收益时启用 MultiDraw，否则保持普通 draw 并报告原因。
+- 每项优化分别记录 100/1000 图元的 CPU build、上传 bytes、draw calls、GPU time 和显存，不能只报告 FPS。
+
+完成门槛：所有优化可独立关闭；关闭时结果与当前路径一致；启用后不破坏 picking、stencil、HDR、物理动画、图层和撤销。
+
+#### M21.7 UI、状态恢复与集中收尾
+
+- 继续保持“基础编辑主窗口 + 引擎实验室”双窗口结构；新增功能放入现有 3D、纹理或渲染管线页，不新增主窗口 Dock。
+- 使用 `QSettings` 保存窗口几何、Dock/分页位置和实验室最后页面；恢复前校验屏幕范围，低分辨率下自动夹紧，避免不可见窗口。
+- 运行时实验参数分组提供恢复默认值；不把 GPU 资源句柄、绝对图片路径或瞬时统计写入设置。
+- 更新 README、原生构建说明、项目架构图、功能矩阵和可复现实验步骤；为每个核心算法准备“输入—公式—C++—OpenGL—附件—限制”的讲解文本。
+
+完成门槛：小窗口控件可访问；关闭/重开恢复合理；设置损坏可安全回默认；主编辑器基础绘制、图层、碰撞、物理、撤销/重做和保存加载完整回归。
+
+#### 连续实施验证策略
+
+每个内部切片依次执行：
+
+1. 纯数学 golden tests 和非法输入；
+2. C++/Python parity；
+3. Qt offscreen 的 UI、History、资源所有权和异常隔离；
+4. 完整 `unittest` 回归；
+5. 对应真实 OpenGL smoke，包含创建、resize、模式往返和 context 释放；
+6. 安全档资源/性能记录；
+7. 独立本地提交后继续下一切片。
+
+综合完成标准：所有承诺项均有最终画面和至少一个中间附件/调试视图；经典算法有 C++ reference 或明确说明为何只适合 GPU；主画布与 3D 色彩公式一致；功能关闭时保持既有输出；无文档/History 污染；原生缺失、OpenGL 能力不足、Shader/FBO 失败和设置损坏均可安全回退；完整测试、全部真实 smoke、资源预算和文档统一完成后再交付集中验收。
+
+#### 预计修改边界
+
+- `src/core/`：共享颜色/HDR、Bloom、曝光、图片纹理、SDF、GPU query 与 profiling 的纯数据和 reference；
+- `src/ui/`：3D、纹理、管线实验页面扩展及 QSettings 工作区恢复；
+- `src/widgets/graphics_view.py` 与 `src/core/opengl_backend.py`：仅接入主画布既有 HDR/计时共享接口，不把 3D context 资源跨 context 共享；
+- `native/include`、`native/src`、`native/python_bindings`：颜色空间/Mip、曝光统计、距离变换、dash 和可选索引化数值内核；
+- `tests/`、`benchmarks/`、README 与本计划：同步增加 parity、真实 context、资源、性能和讲解材料。
+
+任何需要改变 Canvas/Shape 序列化 schema、撤销模型、跨 context GPU 资源共享或完整 Renderer 所有权的方案，必须暂停该子项并先修改本计划；不得以“一次完成”为理由扩大基础架构风险。
+
+#### M21.0/M21.1 实施回填
+
+- 基线：原生模块重建成功，M20.1 初始完整测试 141/141；主画布 HDR 与原 3D OpenGL smoke 均无失败。基线 3D viewport 为 OpenGL 4.6、36 vertices、1 次 mesh upload，G-buffer 约 9.36–10.19 MiB（随 viewport 尺寸变化）。
+- 共享契约：原 `CanvasHdrConfig` 提升为后端无关 `ToneMappingConfig` 并保留兼容别名；新增 IEC sRGB 编解码和 Rec.709 线性亮度 reference。`Pipeline3DConfig` 通过不可变嵌套配置复用同一 Tone Mapping 定义。
+- 3D GPU：Forward 与 Deferred 最终颜色均可写入 viewport-size `RGBA16F + CombinedDepthStencil`，再由共享数学公式执行 Linear/Reinhard/ACES、exposure、亮度热力图、过曝遮罩和 gamma 2.2。两个 context 仅共享 CPU 配置，不共享 FBO/texture。
+- 附件/UI：3D 页增加 HDR 开关、算子、曝光和调试视图；附件页增加 HDR Scene 与 Tone Mapped Output；状态显示 target、估算 bytes、pass/frame。所有变化保持 Canvas revision/History 中立。
+- 真实验证：Forward Linear/Reinhard/ACES heatmap 与 Deferred ACES final/overexposure 五种 case 得到五个不同 framebuffer signature；HDR target `677×658`、约 5.10 MiB，mesh upload 始终为 1，无 Shader/FBO 错误，HDR Scene 与最终附件签名不同。
+- 自动化：共享契约、sRGB round-trip、亮度、3D 配置和 UI 中立性新增 3 项测试；完整结果 144/144。新增真实 smoke `opengl_pipeline3d_hdr_smoke.py`。
+
+#### M21.2 实施回填
+
+- C++/Python 新增相同的 soft-knee Bloom 高亮选择 reference；阈值下方过渡区保持连续非零贡献，knee=0 时退化为硬阈值。原生扩展重建成功并达到双精度 parity。
+- 3D viewport 新增最多五级的半分辨率 RGBA16F 金字塔；第一级执行 soft-threshold 和 9-tap 过滤，后续级继续 9-tap 降采样。避免每级双 ping-pong FBO，使当前 `677×658` viewport 的五级资源约 1.13 MiB。
+- HDR 合成 Shader 同时采样有效 Bloom levels，按 level count 归一并乘强度，在曝光和 Tone Mapping 前与线性 scene color 合成。开关、threshold、knee、intensity、levels 只更新运行时状态。
+- UI/附件新增 Bloom 控制、Near/Far pyramid 手动预览、资源尺寸/bytes/pass 统计。当前五级尺寸为 `338×329 → 169×164 → 84×82 → 42×41 → 21×20`。
+- 真实 OpenGL：Forward ACES 的 Bloom off/on、热力图、Deferred final/overexposure 均获得不同 signature；Near/Far 附件有效且不同，mesh upload 保持 1，无 Shader/FBO 错误。
+- 自动化完整结果 145/145；Bloom 配置、soft threshold、原生 parity 和 UI History 中立性已覆盖。
+
+#### M21.3 实施回填
+
+- 新增 64-bin `-12..+4 EV` 对数亮度 histogram、2%/98% percentile 裁剪、目标中灰/EV compensation 和非对称指数时间适应的 Python reference；覆盖空输入、非法值和暗亮往返。
+- C++17 新增 `auto_exposure_from_luminance`，使用与 Python 相同的 bin center 和 percentile 部分权重；CPython facade 支持旧 ABI 自动回退，固定样本达到双精度 parity。
+- GPU 每 100 ms 把线性 HDR scene 以 9-tap 缩减到 `32×32 RGBA16F`，只读取 1024 个 float pixels，不读取完整 framebuffer；C++ 根据 Rec.709 luminance 计算目标 exposure，约 30 FPS timer 只负责平滑适应。
+- UI 增加自动/固定曝光、compensation、middle grey、明/暗适应速度和 16 列压缩直方图；状态明确报告 current/target、更新次数、readback ms 和真实 backend。
+- 真实 OpenGL：-1 EV compensation 下目标曝光约 `0.3987`，当前值由 1.0 连续收敛到约 `0.554`；900 ms 内完成 7 次统计，最近一次 32² float readback 约 1.33 ms，最终 signature 随曝光变化，mesh upload 保持 1。
+- 完整自动化 146/146；真实 smoke 报告 `GPU 32x32 reduction + C++ native`，无 GL/Qt 事件循环错误。
+
+#### M21.4 实施回填
+
+- 纹理实验页支持本地 PNG/JPEG 导入，读取前限制文件为 64 MiB、解码尺寸为 2048×2048；统一转换为 RGBA8，只显示文件名且不写入文档、History 或持久设置。非方形纹理尺寸贯穿 mip、采样与 GPU 上传。
+- Python/C++ 增加线性光空间 sRGB box mip 生成：RGB 先按 IEC sRGB 解码、平均后重新编码，alpha 保持线性平均；黑白 `2×2 → 1×1` golden case 中错误 gamma 结果为 128，正确结果为 188，原生与 Python 字节级一致。
+- GPU 提供 Linear、sRGB 正确 mip、sRGB 错误 gamma mip 三种可切换路径；sRGB 路径使用 `GL_SRGB8_ALPHA8` 自动解码，Shader 在最终输出重新编码，且继续复用 M19 的过滤、LOD、footprint 与各向异性调试视图。
+- OpenGL context 探测 S3TC/BC1/BC3 扩展并明确报告能力。本阶段不实现通用 DDS 容器和直接压缩上传：有扩展时标注“能力可用但未启用 DDS 直传”，无扩展时明确回退 RGBA8，避免将驱动能力误报为功能实现。
+- 真实 OpenGL 使用程序生成的 `96×64` 渐变源验证三种色彩解释，得到三个不同 framebuffer signature；最终内部格式为 `GL_SRGB8_ALPHA8`，切换发生 4 次受控上传，动画阶段 upload 计数保持 4，无资源抖动或错误。
+- 语法、纹理数学、原生 parity 与 UI 工作区定向测试 17/17 通过；M21.4 完成后进入距离场阶段。
+
+#### M21.5 实施回填
+
+- Python/C++17 均实现 Felzenszwalb–Huttenlocher 一维下包络算法，并通过横向、纵向各一次变换得到精确二维欧氏距离；内外两次距离之差定义为“图形内正、图形外负”的 signed field。
+- 原生模块新增 R8 mask 接口与自动 Python fallback；单点 `3×3` golden case 验证轴向距离 1、对角距离 `√2`，`9×9` 圆形样本达到双精度 C++/Python parity，非法尺寸和 range 安全拒绝。
+- 引擎实验室增加“SDF 距离场”页，不进入主窗口 Dock、不修改 Shape/Canvas/Serializer。源支持 Qt 动态字形 G、圆形和星形；默认生成单张 `128×128` 场并以可移植 RGBA8 归一编码上传。
+- OpenGL 同屏左侧绘制 bitmap coverage、右侧绘制 SDF；Shader 使用 signed threshold、`fwidth`/`smoothstep` 抗锯齿，并提供描边、指数发光、二值 mask、signed distance 和等值线视图。0.25×..8× 缩放、描边与发光仅更新 uniform，源或 range 改变才重建。
+- 真实 OpenGL smoke 中 final/mask/distance/contours/0.25×/8× 六种 case 均得到不同 framebuffer signature；rebuild 保持 1、纹理上传保持 2，backend 为 `C++ native exact EDT`，无 Shader/GL 错误。
+- 初次动态字形生成时间包含 Qt 字体引擎冷启动并在界面如实显示；当前单资源方案无需 Atlas/LRU，若未来扩展多 glyph 缓存再引入有界 LRU。
+
+#### M21.6 实施回填
+
+- C++17/Python 新增连续弧长 dash segmentation。Dash、Dot、DashDot 的 pattern 以线宽为尺度，沿完整 polyline/闭环累计相位，不在每段或连接线路由拐角处重启；GeometryCompiler 将 on-segment 输出为 GPU `LINES`，关闭或 SolidLine 时保持原路径。
+- Golden case 覆盖 `10+10` 的直角折线并验证拐角相位延续；原生/Python 达到双精度 parity。100/1000 条三段折线基准分别为 Python `0.652/6.552 ms`、C++ `0.157/1.402 ms`，约 `4.15×/4.67×`，输出 `2000/20000` vertices（float32 xy 为 16/160 KiB）。
+- 主画布已有 `_GpuTimerQueryPool`，使用 4-slot 非阻塞 `GL_TIME_ELAPSED` ring；query 不可用时 profiler 元数据显示 unavailable，CPU draw time 不冒充 GPU time。本轮未把同一 query 对象跨 OpenGL context 共享。
+- Indexed stroke 未切换：coverage triangle ABI 中 position/coverage 的逐角属性以及 dash 的最小 endpoint stream 尚无端到端 ≥25% 上传收益证据。MultiDraw 未切换：PyQt 函数表和跨驱动 command bucket 尚无稳定矩阵。两项按阶段门槛明确 defer，而不是制造不可验证优化。
+- 新增 `benchmarks/benchmark_dash_pipeline.py` 固化 100/1000 规模、上传字节和决策理由，后续只有获得完整视觉 parity 与驱动证据才重启上述优化。
+
+#### M21.7 实施回填
+
+- 主窗口与引擎实验室使用 `QSettings` 保存窗口 geometry；主窗口额外保存 Dock state，实验室保存最后分页。恢复后检查所有屏幕 available geometry，不可见窗口自动按主屏夹紧并居中。
+- offscreen 自动化禁用注册表持久化，避免测试污染用户工作区；损坏或类型错误的设置安全忽略。仅保存 UI geometry/state/page，不保存 GPU handle、图片绝对路径、实验资源或瞬时统计。
+- SDF 距离场加入引擎实验室分页和“引擎展示”菜单，保持基础编辑器仅有属性/图层两个 Dock；实验功能继续使用可滚动分页布局。
+- README 已按当前实现重写：明确项目定位、算法功能、架构/数据流、C++/OpenGL 边界、构建、测试、真实 smoke、性能基准与已知限制；原生说明同步覆盖全部 C++ kernels。
+- M21 集中验收采用完整 unittest、3D HDR/texture/SDF 真实 OpenGL smoke、原生重建和 `git diff --check`。人工 GUI 验收仍由用户在最终集中交付后执行。

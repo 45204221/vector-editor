@@ -63,7 +63,8 @@ std::array<std::uint8_t, 4> bytes(const std::array<double, 4>& values) {
 }  // namespace
 
 std::vector<TextureLevel> generate_mipmaps(
-        const std::vector<std::uint8_t>& rgba, int width, int height) {
+        const std::vector<std::uint8_t>& rgba, int width, int height,
+        bool srgb_linear) {
     if (width <= 0 || height <= 0 || width > 2048 || height > 2048) {
         throw std::invalid_argument("texture dimensions must be between 1 and 2048");
     }
@@ -83,17 +84,38 @@ std::vector<TextureLevel> generate_mipmaps(
             for (int x = 0; x < next_width; ++x) {
                 for (int channel = 0; channel < 4; ++channel) {
                     int total = 0, count = 0;
+                    double linear_total = 0.0;
                     for (int offset_y = 0; offset_y < 2; ++offset_y) {
                         const int source_y = std::min(height - 1, y * 2 + offset_y);
                         for (int offset_x = 0; offset_x < 2; ++offset_x) {
                             const int source_x = std::min(width - 1, x * 2 + offset_x);
-                            total += source.rgba[(static_cast<std::size_t>(source_y) *
-                                width + source_x) * 4 + channel];
+                            const auto value = source.rgba[(
+                                static_cast<std::size_t>(source_y) * width +
+                                source_x) * 4 + channel];
+                            total += value;
+                            if (srgb_linear && channel < 3) {
+                                const double encoded = value / 255.0;
+                                linear_total += encoded <= 0.04045
+                                    ? encoded / 12.92
+                                    : std::pow((encoded + 0.055) / 1.055, 2.4);
+                            }
                             ++count;
                         }
                     }
-                    next.rgba[(static_cast<std::size_t>(y) * next_width + x) * 4 +
-                              channel] = static_cast<std::uint8_t>((total + count / 2) / count);
+                    auto& destination = next.rgba[(static_cast<std::size_t>(y) *
+                        next_width + x) * 4 + channel];
+                    if (srgb_linear && channel < 3) {
+                        const double linear = linear_total / count;
+                        const double encoded = linear <= 0.0031308
+                            ? linear * 12.92
+                            : 1.055 * std::pow(linear, 1.0 / 2.4) - 0.055;
+                        destination = static_cast<std::uint8_t>(std::clamp(
+                            static_cast<int>(std::floor(encoded * 255.0 + 0.5)),
+                            0, 255));
+                    } else {
+                        destination = static_cast<std::uint8_t>(
+                            (total + count / 2) / count);
+                    }
                 }
             }
         }

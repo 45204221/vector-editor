@@ -160,6 +160,47 @@ std::string valid_cap(const std::string& value) {
 
 }  // namespace
 
+Mesh2 dash_polyline(const std::vector<Point2>& points,
+                    const std::vector<double>& input_pattern, double offset,
+                    bool closed) {
+    auto clean = clean_points(points, closed);
+    if (clean.size() < 2 || input_pattern.empty()) return {};
+    std::vector<double> pattern = input_pattern;
+    for (double value : pattern)
+        if (!std::isfinite(value) || value <= kEpsilon) return {};
+    if (pattern.size() % 2 != 0)
+        pattern.insert(pattern.end(), input_pattern.begin(), input_pattern.end());
+    if (closed) clean.push_back(clean.front());
+    double period = 0.0; for (double value : pattern) period += value;
+    double phase = std::fmod(offset, period); if (phase < 0.0) phase += period;
+    std::size_t pattern_index = 0;
+    while (phase >= pattern[pattern_index] - kEpsilon) {
+        phase -= pattern[pattern_index]; pattern_index = (pattern_index + 1) % pattern.size();
+    }
+    double remaining = pattern[pattern_index] - phase;
+    bool draw = pattern_index % 2 == 0;
+    Mesh2 result;
+    for (std::size_t index = 0; index + 1 < clean.size(); ++index) {
+        const Point2 first = clean[index], second = clean[index + 1];
+        const Point2 delta = sub(second, first); const double segment_length = length(delta);
+        if (segment_length <= kEpsilon) continue;
+        double cursor = 0.0;
+        while (cursor < segment_length - kEpsilon) {
+            const double step = std::min(remaining, segment_length - cursor);
+            if (draw && step > kEpsilon) {
+                result.push_back(add(first, mul(delta, cursor / segment_length)));
+                result.push_back(add(first, mul(delta, (cursor + step) / segment_length)));
+            }
+            cursor += step; remaining -= step;
+            if (remaining <= kEpsilon) {
+                pattern_index = (pattern_index + 1) % pattern.size();
+                remaining = pattern[pattern_index]; draw = pattern_index % 2 == 0;
+            }
+        }
+    }
+    return result;
+}
+
 Mesh2 tessellate_stroke(const std::vector<Point2>& input, double width, bool closed,
                         const std::string& join_value, const std::string& cap_value,
                         double miter_limit, int round_segments) {

@@ -26,6 +26,7 @@ from .toolbar import Toolbar
 from .properties import PropertiesPanel
 from .layer_panel import LayerPanel
 from .engine_lab_window import EngineLabWindow
+from .workspace_settings import restore_window, save_window
 
 
 class MainWindow(QMainWindow):
@@ -40,6 +41,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("矢量图形编辑器")
         self.setMinimumSize(900, 600)
         self.resize(1200, 800)
+        restore_window(self, "workspace/main_geometry", "workspace/main_state")
 
     def init_ui(self) -> None:
         """初始化用户界面"""
@@ -234,6 +236,9 @@ class MainWindow(QMainWindow):
         texture_sampling_action = QAction("打开纹理采样/LOD 实验", self)
         texture_sampling_action.triggered.connect(self.show_texture_sampling_panel)
         engine_menu.addAction(texture_sampling_action)
+        sdf_action = QAction("打开 SDF 距离场实验", self)
+        sdf_action.triggered.connect(self.show_sdf_panel)
+        engine_menu.addAction(sdf_action)
         lighting_action = QAction("打开 2D 光照/阴影实验", self)
         lighting_action.triggered.connect(self.show_lighting_panel)
         pipeline3d_action = QAction("打开 3D 渲染管线实验", self)
@@ -383,6 +388,7 @@ class MainWindow(QMainWindow):
         self.lighting_panel = self.engine_lab_window.lighting_panel
         self.pipeline3d_panel = self.engine_lab_window.pipeline3d_panel
         self.texture_sampling_panel = self.engine_lab_window.texture_sampling_panel
+        self.sdf_panel = self.engine_lab_window.sdf_panel
 
     def setup_connections(self) -> None:
         """设置信号连接"""
@@ -427,6 +433,9 @@ class MainWindow(QMainWindow):
     def show_texture_sampling_panel(self):
         self.engine_lab_window.show_page("texture_sampling")
 
+    def show_sdf_panel(self):
+        self.engine_lab_window.show_page("sdf")
+
     def set_command_rendering(self, enabled):
         self.graphics_view.set_command_rendering(enabled)
         backend_name = "命令缓冲 QPainter" if enabled else "传统 QPainter"
@@ -443,6 +452,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(self.graphics_view.render_backend_status())
 
     def closeEvent(self, event):
+        save_window(self, "workspace/main_geometry", "workspace/main_state")
         if hasattr(self, "engine_lab_window"):
             self.engine_lab_window.hide()
         super().closeEvent(event)

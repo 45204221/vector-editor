@@ -3,6 +3,7 @@
 from . import native_geometry
 from .texture_sampling import (MipLevel, TextureFootprint,
                                generate_mipmaps as python_generate,
+                               generate_mipmaps_srgb as python_generate_srgb,
                                sample_anisotropic as python_anisotropic,
                                sample_mipmaps as python_sample)
 
@@ -38,6 +39,21 @@ def generate_mipmaps(rgba, width, height):
         except Exception as error:
             _runtime_error = str(error)
     return python_generate(rgba, width, height), "Python reference"
+
+
+def generate_mipmaps_srgb(rgba, width, height):
+    global _runtime_error
+    module = _module()
+    if module is not None and hasattr(module, "generate_mipmaps_srgb"):
+        try:
+            result = module.generate_mipmaps_srgb(
+                bytes(rgba), int(width), int(height))
+            _runtime_error = ""
+            return tuple(MipLevel(int(w), int(h), bytes(pixels))
+                         for w, h, pixels in result), "C++ native"
+        except Exception as error:
+            _runtime_error = str(error)
+    return python_generate_srgb(rgba, width, height), "Python reference"
 
 
 def sample_texture(rgba, width, height, u, v, lod, filter="nearest", repeat=True):

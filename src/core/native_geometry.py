@@ -119,3 +119,15 @@ def tessellate_segments_coverage(points, width, cap="butt", antialias_width=1.0,
             points[index:index + 2], width, cap=cap,
             antialias_width=antialias_width, round_segments=round_segments))
     return tuple(result)
+
+
+def dash_polyline(points, pattern, offset=0.0, closed=False):
+    global _runtime_error
+    if is_enabled() and hasattr(_native, "dash_polyline"):
+        try:
+            result = _native.dash_polyline(points, pattern, offset=offset, closed=closed)
+            _runtime_error = ""
+            return tuple(result)
+        except Exception as error:
+            _runtime_error = str(error)
+    return _python.dash_polyline(points, pattern, offset, closed)

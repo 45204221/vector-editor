@@ -1,9 +1,11 @@
 """Runtime configuration and CPU stage tracing for the M17 3D pipeline."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import math
 
 from PyQt5.QtGui import QMatrix4x4, QVector3D, QVector4D
+
+from .hdr_postprocess import ToneMappingConfig
 
 
 VIEW_MODES = (("最终光照", "final"), ("线框", "wireframe"),
@@ -14,7 +16,11 @@ ATTACHMENT_MODES = (("Normal RGB", "normal"),
                     ("Shadow Map", "shadow"),
                     ("G-Position", "g_position"),
                     ("G-Normal", "g_normal"),
-                    ("G-Albedo", "g_albedo"))
+                    ("G-Albedo", "g_albedo"),
+                    ("HDR Scene (RGBA16F)", "hdr_scene"),
+                    ("Bloom Near Level", "bloom_near"),
+                    ("Bloom Far Level", "bloom_far"),
+                    ("Tone Mapped Output", "hdr_final"))
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,17 @@ class Pipeline3DConfig:
     pcf_radius: int = 1
     render_path: str = "forward"
     light_count: int = 4
+    hdr: ToneMappingConfig = field(default_factory=ToneMappingConfig)
+    bloom_enabled: bool = False
+    bloom_threshold: float = 1.0
+    bloom_knee: float = 0.5
+    bloom_intensity: float = 0.8
+    bloom_levels: int = 5
+    auto_exposure: bool = False
+    exposure_compensation: float = 0.0
+    middle_grey: float = 0.18
+    brighten_speed: float = 3.0
+    darken_speed: float = 1.5
 
     def __post_init__(self):
         if self.source_mode not in ("cube", "selection"):
@@ -76,6 +93,22 @@ class Pipeline3DConfig:
             raise ValueError("render path must be forward or deferred")
         if self.light_count not in (1, 4, 8):
             raise ValueError("light count must be 1, 4 or 8")
+        if not isinstance(self.hdr, ToneMappingConfig):
+            raise TypeError("hdr must be a ToneMappingConfig")
+        if not 0.0 <= self.bloom_threshold <= 16.0:
+            raise ValueError("bloom threshold must be between 0 and 16")
+        if not 0.0 <= self.bloom_knee <= 1.0:
+            raise ValueError("bloom knee must be between 0 and 1")
+        if not 0.0 <= self.bloom_intensity <= 4.0:
+            raise ValueError("bloom intensity must be between 0 and 4")
+        if self.bloom_levels not in (1, 2, 3, 4, 5):
+            raise ValueError("bloom levels must be between 1 and 5")
+        if not -4.0 <= self.exposure_compensation <= 4.0:
+            raise ValueError("exposure compensation must be between -4 and 4 EV")
+        if not 0.01 <= self.middle_grey <= 1.0:
+            raise ValueError("middle grey must be between 0.01 and 1")
+        if self.brighten_speed <= 0.0 or self.darken_speed <= 0.0:
+            raise ValueError("exposure adaptation speeds must be positive")
 
     def changed(self, **changes):
         return replace(self, **changes)

@@ -10,6 +10,7 @@
 #include "software_rasterizer.hpp"
 #include "texture_sampling.hpp"
 #include "tone_mapping.hpp"
+#include "distance_field.hpp"
 
 namespace {
 
@@ -255,6 +256,25 @@ PyObject* py_tessellate_stroke_coverage(PyObject*, PyObject* args, PyObject* kwa
     }
 }
 
+PyObject* py_dash_polyline(PyObject*, PyObject* args, PyObject* kwargs) {
+    PyObject *points_object = nullptr, *pattern_object = nullptr;
+    double offset = 0.0; int closed = 0;
+    static const char* names[] = {"points", "pattern", "offset", "closed", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|dp", const_cast<char**>(names),
+                                     &points_object, &pattern_object, &offset, &closed)) return nullptr;
+    std::vector<vector_engine::Point2> points;
+    if (!parse_points(points_object, points)) return nullptr;
+    PyObject* sequence = PySequence_Fast(pattern_object, "pattern must be a sequence");
+    if (!sequence) return nullptr;
+    std::vector<double> pattern;
+    for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(sequence); ++index) {
+        pattern.push_back(PyFloat_AsDouble(PySequence_Fast_GET_ITEM(sequence, index)));
+        if (PyErr_Occurred()) { Py_DECREF(sequence); return nullptr; }
+    }
+    Py_DECREF(sequence);
+    return mesh2_to_tuple(vector_engine::dash_polyline(points, pattern, offset, closed != 0));
+}
+
 PyObject* py_visibility_polygon(PyObject*, PyObject* args, PyObject* kwargs) {
     PyObject* light_object = nullptr;
     PyObject* segments_object = nullptr;
@@ -390,6 +410,20 @@ PyObject* py_generate_mipmaps(PyObject*, PyObject* args) {
     }
 }
 
+PyObject* py_generate_mipmaps_srgb(PyObject*, PyObject* args) {
+    PyObject* rgba_object = nullptr;
+    int width = 0, height = 0;
+    if (!PyArg_ParseTuple(args, "Oii", &rgba_object, &width, &height)) return nullptr;
+    std::vector<std::uint8_t> rgba;
+    if (!parse_rgba_buffer(rgba_object, rgba)) return nullptr;
+    try {
+        return mip_levels_to_tuple(
+            vector_engine::generate_mipmaps(rgba, width, height, true));
+    } catch (const std::exception& error) {
+        PyErr_SetString(PyExc_ValueError, error.what()); return nullptr;
+    }
+}
+
 PyObject* py_sample_texture(PyObject*, PyObject* args, PyObject* kwargs) {
     PyObject* rgba_object = nullptr;
     int width = 0, height = 0, repeat = 1;
@@ -456,6 +490,71 @@ PyObject* py_tone_map_rgb(PyObject*, PyObject* args, PyObject* kwargs) {
     }
 }
 
+PyObject* py_bloom_soft_threshold(PyObject*, PyObject* args, PyObject* kwargs) {
+    double red = 0.0, green = 0.0, blue = 0.0, threshold = 1.0, knee = 0.5;
+    static const char* names[] = {"red", "green", "blue", "threshold",
+                                  "knee", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ddddd",
+            const_cast<char**>(names), &red, &green, &blue, &threshold,
+            &knee)) return nullptr;
+    try {
+        const auto result = vector_engine::bloom_soft_threshold(
+            {red, green, blue}, threshold, knee);
+        return Py_BuildValue("(ddd)", result[0], result[1], result[2]);
+    } catch (const std::exception& error) {
+        PyErr_SetString(PyExc_ValueError, error.what()); return nullptr;
+    }
+}
+
+PyObject* py_auto_exposure_from_luminance(
+        PyObject*, PyObject* args, PyObject* kwargs) {
+    PyObject* samples = nullptr;
+    int bins = 64;
+    double min_ev = -12.0, max_ev = 4.0, low = 0.02, high = 0.98;
+    double middle = 0.18, compensation = 0.0;
+    static const char* names[] = {"luminances", "bins", "min_ev", "max_ev",
+        "low_percentile", "high_percentile", "middle_grey",
+        "compensation_ev", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|idddddd",
+            const_cast<char**>(names), &samples, &bins, &min_ev, &max_ev,
+            &low, &high, &middle, &compensation)) return nullptr;
+    PyObject* sequence = PySequence_Fast(samples, "luminances must be a sequence");
+    if (!sequence) return nullptr;
+    std::vector<double> values;
+    const Py_ssize_t count = PySequence_Fast_GET_SIZE(sequence);
+    values.reserve(static_cast<std::size_t>(count));
+    for (Py_ssize_t index = 0; index < count; ++index) {
+        const double value = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(sequence, index));
+        if (PyErr_Occurred()) { Py_DECREF(sequence); return nullptr; }
+        values.push_back(value);
+    }
+    Py_DECREF(sequence);
+    try {
+        return PyFloat_FromDouble(vector_engine::auto_exposure_from_luminance(
+            values, bins, min_ev, max_ev, low, high, middle, compensation));
+    } catch (const std::exception& error) {
+        PyErr_SetString(PyExc_ValueError, error.what()); return nullptr;
+    }
+}
+
+PyObject* py_signed_distance_field(PyObject*, PyObject* args) {
+    PyObject* mask_object = nullptr;
+    int width = 0, height = 0;
+    if (!PyArg_ParseTuple(args, "Oii", &mask_object, &width, &height)) return nullptr;
+    std::vector<std::uint8_t> mask;
+    if (!parse_rgba_buffer(mask_object, mask)) return nullptr;
+    try {
+        const auto values = vector_engine::signed_distance_field(mask, width, height);
+        PyObject* result = PyTuple_New(static_cast<Py_ssize_t>(values.size()));
+        if (!result) return nullptr;
+        for (Py_ssize_t index = 0; index < static_cast<Py_ssize_t>(values.size()); ++index)
+            PyTuple_SET_ITEM(result, index, PyFloat_FromDouble(values[static_cast<std::size_t>(index)]));
+        return result;
+    } catch (const std::exception& error) {
+        PyErr_SetString(PyExc_ValueError, error.what()); return nullptr;
+    }
+}
+
 PyMethodDef methods[] = {
     {"tessellate_stroke", reinterpret_cast<PyCFunction>(py_tessellate_stroke),
      METH_VARARGS | METH_KEYWORDS, "Tessellate a polyline into 2D triangles."},
@@ -463,6 +562,9 @@ PyMethodDef methods[] = {
      reinterpret_cast<PyCFunction>(py_tessellate_stroke_coverage),
      METH_VARARGS | METH_KEYWORDS,
      "Tessellate a polyline into x/y/coverage triangles."},
+    {"dash_polyline", reinterpret_cast<PyCFunction>(py_dash_polyline),
+     METH_VARARGS | METH_KEYWORDS,
+     "Split a polyline into visible dash endpoint pairs by arc length."},
     {"visibility_polygon", reinterpret_cast<PyCFunction>(py_visibility_polygon),
      METH_VARARGS | METH_KEYWORDS,
      "Compute a 2D visibility polygon and nearest-hit rays."},
@@ -474,6 +576,8 @@ PyMethodDef methods[] = {
      "Rasterize clip-space triangles into CPU color/depth/barycentric buffers."},
     {"generate_mipmaps", py_generate_mipmaps, METH_VARARGS,
      "Generate a complete RGBA8 mip chain with a 2x2 box filter."},
+    {"generate_mipmaps_srgb", py_generate_mipmaps_srgb, METH_VARARGS,
+     "Generate RGBA8 mips while averaging sRGB channels in linear light."},
     {"sample_texture", reinterpret_cast<PyCFunction>(py_sample_texture),
      METH_VARARGS | METH_KEYWORDS,
      "Sample an RGBA8 mip chain with nearest, bilinear or trilinear filtering."},
@@ -483,6 +587,16 @@ PyMethodDef methods[] = {
     {"tone_map_rgb", reinterpret_cast<PyCFunction>(py_tone_map_rgb),
      METH_VARARGS | METH_KEYWORDS,
      "Apply Linear, Reinhard or ACES tone mapping to one linear HDR color."},
+    {"bloom_soft_threshold",
+     reinterpret_cast<PyCFunction>(py_bloom_soft_threshold),
+     METH_VARARGS | METH_KEYWORDS,
+     "Select the soft-thresholded HDR contribution used by Bloom."},
+    {"auto_exposure_from_luminance",
+     reinterpret_cast<PyCFunction>(py_auto_exposure_from_luminance),
+     METH_VARARGS | METH_KEYWORDS,
+     "Estimate exposure from percentile-clipped log luminance samples."},
+    {"signed_distance_field", py_signed_distance_field, METH_VARARGS,
+     "Compute an exact Euclidean signed distance field from an R8 mask."},
     {nullptr, nullptr, 0, nullptr},
 };
 

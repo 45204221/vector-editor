@@ -6,6 +6,7 @@ import math
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .rendering import RenderDelta, RenderDirtyFlag, RenderSnapshot
+from .native_geometry import dash_polyline
 
 
 Point = Tuple[float, float]
@@ -148,6 +149,18 @@ class GeometryCompiler:
                                    _world_bounds(vertices, transform, padding),
                                    effective_visible)
 
+        def stroke_primitive(topology, vertices, closed=False):
+            vertices = tuple(vertices)
+            if material.pen_style == 1:
+                return primitive(topology, vertices)
+            width = max(1.0, material.line_width)
+            pattern = {2: (4*width, 2*width), 3: (width, 2*width),
+                       4: (4*width, 2*width, width, 2*width)}.get(material.pen_style)
+            if not pattern:
+                return primitive(topology, vertices)
+            return primitive(PrimitiveTopology.LINES,
+                             dash_polyline(vertices, pattern, closed=closed))
+
         if shape_type in ("rectangle", "rounded_rect", "org_node"):
             if shape_type == "rounded_rect":
                 points = _rounded_rect_points(shape["rect"], shape.get("radius", 20))
@@ -156,23 +169,24 @@ class GeometryCompiler:
             else:
                 points = _rect_points(shape["rect"])
             return (primitive(PrimitiveTopology.TRIANGLE_FAN, points),
-                    primitive(PrimitiveTopology.LINE_LOOP, points))
+                    stroke_primitive(PrimitiveTopology.LINE_LOOP, points, True))
         if shape_type == "ellipse":
             ring = _ellipse_points(shape["rect"], self.curve_segments)
             center = ((sum(point[0] for point in ring) / len(ring),
                        sum(point[1] for point in ring) / len(ring)),)
             return (primitive(PrimitiveTopology.TRIANGLE_FAN, center + ring + ring[:1]),
-                    primitive(PrimitiveTopology.LINE_LOOP, ring))
+                    stroke_primitive(PrimitiveTopology.LINE_LOOP, ring, True))
         if shape_type == "line":
             line = shape["line"]
-            return (primitive(PrimitiveTopology.LINES,
-                              ((line["x1"], line["y1"]), (line["x2"], line["y2"]))),)
+            return (stroke_primitive(PrimitiveTopology.LINES,
+                                     ((line["x1"], line["y1"]),
+                                      (line["x2"], line["y2"]))),)
         if shape_type in ("polygon", "polyline"):
             points = tuple((point["x"], point["y"]) for point in shape.get("points", ()))
             if shape_type == "polygon":
                 return (primitive(PrimitiveTopology.TRIANGLE_FAN, points),
                         primitive(PrimitiveTopology.LINE_LOOP, points))
-            return (primitive(PrimitiveTopology.LINE_STRIP, points),)
+            return (stroke_primitive(PrimitiveTopology.LINE_STRIP, points),)
         if shape_type in ("diamond", "parallelogram"):
             rect = shape["rect"]
             corners = _rect_points(rect)
@@ -186,7 +200,7 @@ class GeometryCompiler:
                 points = ((corners[0][0] + skew, corners[0][1]), corners[1],
                           (corners[2][0] - skew, corners[2][1]), corners[3])
             return (primitive(PrimitiveTopology.TRIANGLE_FAN, points),
-                    primitive(PrimitiveTopology.LINE_LOOP, points))
+                    stroke_primitive(PrimitiveTopology.LINE_LOOP, points, True))
         if shape_type == "connection":
             points = tuple(tuple(point) for point in shape.get("routed_points", ()))
             if not points:
@@ -202,7 +216,7 @@ class GeometryCompiler:
                       last[1] - arrow_length * math.sin(angle - arrow_angle)),
                      (last[0] - arrow_length * math.cos(angle + arrow_angle),
                       last[1] - arrow_length * math.sin(angle + arrow_angle)))
-            return (primitive(PrimitiveTopology.LINE_STRIP, points),
+            return (stroke_primitive(PrimitiveTopology.LINE_STRIP, points),
                     primitive(PrimitiveTopology.TRIANGLE_FAN, arrow, render_pass=2,
                               fill_from_stroke=True))
         if shape_type == "text":

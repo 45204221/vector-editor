@@ -11,7 +11,12 @@ if SRC not in sys.path:
 
 from PyQt5.QtWidgets import QApplication
 from core import native_hdr
-from core.hdr_postprocess import CanvasHdrConfig, tone_map_rgb
+from core.hdr_postprocess import (CanvasHdrConfig, ToneMappingConfig,
+                                  adapt_exposure, bloom_soft_threshold,
+                                  exposure_from_histogram, linear_to_srgb,
+                                  log_luminance_histogram,
+                                  relative_luminance,
+                                  srgb_to_linear, tone_map_rgb)
 from ui.main_window import MainWindow
 
 
@@ -19,6 +24,9 @@ APP = QApplication.instance() or QApplication([])
 
 
 class HdrToneMappingTests(unittest.TestCase):
+    def test_canvas_config_is_shared_tone_mapping_contract(self):
+        self.assertIs(CanvasHdrConfig, ToneMappingConfig)
+
     def test_config_validation_and_changes(self):
         config = CanvasHdrConfig()
         self.assertEqual(config.as_dict(), {
@@ -52,6 +60,56 @@ class HdrToneMappingTests(unittest.TestCase):
                           ((math.inf, 0, 0), 1.0, "linear")):
             with self.assertRaises(ValueError):
                 tone_map_rgb(*arguments)
+
+    def test_srgb_round_trip_and_luminance(self):
+        for encoded in (0.0, 0.02, 0.18, 0.5, 1.0):
+            self.assertAlmostEqual(
+                linear_to_srgb(srgb_to_linear(encoded)), encoded, places=12)
+        self.assertAlmostEqual(relative_luminance((1.0, 1.0, 1.0)), 1.0)
+        self.assertAlmostEqual(relative_luminance((1.0, 0.0, 0.0)), 0.2126)
+        with self.assertRaises(ValueError):
+            srgb_to_linear(1.1)
+        with self.assertRaises(ValueError):
+            linear_to_srgb(-0.1)
+        with self.assertRaises(ValueError):
+            relative_luminance((1.0, 0.0))
+
+    def test_bloom_soft_threshold_and_native_parity(self):
+        soft = bloom_soft_threshold((0.2, 0.4, 0.8), 1.0, 0.5)
+        self.assertTrue(all(0.0 < selected < source
+                            for selected, source in zip(soft, (0.2, 0.4, 0.8))))
+        self.assertEqual(bloom_soft_threshold((0.2, 0.4, 0.8), 1.0, 0.0),
+                         (0.0, 0.0, 0.0))
+        selected = bloom_soft_threshold((4.0, 2.0, 0.5), 1.0, 0.5)
+        self.assertGreater(selected[0], selected[1])
+        self.assertGreater(selected[1], selected[2])
+        actual, backend = native_hdr.bloom_soft_threshold(
+            (4.0, 2.0, 0.5), 1.0, 0.5)
+        expected = bloom_soft_threshold((4.0, 2.0, 0.5), 1.0, 0.5)
+        for first, second in zip(actual, expected):
+            self.assertAlmostEqual(first, second, places=12)
+        self.assertIn(backend, ("C++ native", "Python reference"))
+
+    def test_log_histogram_target_and_temporal_adaptation(self):
+        histogram = log_luminance_histogram([0.18] * 100, bins=64)
+        self.assertEqual(sum(histogram), 100)
+        target = exposure_from_histogram(histogram)
+        self.assertGreater(target, 0.8)
+        self.assertLess(target, 1.3)
+        native_target, backend = native_hdr.auto_exposure_from_luminance(
+            [0.18] * 100, bins=64)
+        self.assertAlmostEqual(native_target, target, places=12)
+        self.assertIn(backend, ("C++ native", "Python reference"))
+        brighter = adapt_exposure(1.0, 4.0, 0.1, 3.0, 1.5)
+        darker = adapt_exposure(4.0, 1.0, 0.1, 3.0, 1.5)
+        self.assertGreater(brighter, 1.0); self.assertLess(brighter, 4.0)
+        self.assertGreater(darker, 1.0); self.assertLess(darker, 4.0)
+        with self.assertRaises(ValueError):
+            log_luminance_histogram([-1.0])
+        with self.assertRaises(ValueError):
+            exposure_from_histogram((0,))
+        with self.assertRaises(ValueError):
+            adapt_exposure(0.0, 1.0, 0.1)
 
     @unittest.skipUnless(native_hdr.is_available(), "native HDR ABI not built")
     def test_cpp_python_parity(self):
